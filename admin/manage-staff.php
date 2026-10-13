@@ -5,6 +5,7 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 include '../config/db.php';
+include 'log_action.php';
 
 // Accept either admin_id or staff_id
 $session_admin_id = $_SESSION['admin_id'] ?? $_SESSION['staff_id'] ?? null;
@@ -13,12 +14,10 @@ if (!$session_admin_id) {
     exit;
 }
 
-// Normalize both keys so the rest of the file works
 $_SESSION['admin_id'] = $session_admin_id;
 $_SESSION['staff_id'] = $session_admin_id;
 $admin_id = (int)$session_admin_id;
 
-// Role guard (only admins can manage staff)
 $admin_role = $_SESSION['admin_role'] ?? $_SESSION['staff_role'] ?? 'admin';
 if ($admin_role !== 'admin') {
     $_SESSION['flash_error'] = "Access denied. Only admins can manage staff.";
@@ -35,9 +34,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_staff'])) {
     $role      = $_POST['role'] ?? 'staff';
     $hostel_id = !empty($_POST['hostel_id']) ? (int)$_POST['hostel_id'] : null;
 
-    if (!in_array($role, ['admin', 'warden', 'staff'], true)) {
-        $role = 'staff';
-    }
+    if (!in_array($role, ['admin', 'warden', 'staff'], true)) $role = 'staff';
 
     if (strlen($password) < 6) {
         $_SESSION['flash_error'] = "Password must be at least 6 characters.";
@@ -55,6 +52,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_staff'])) {
             ");
             $stmt->bind_param("sssssi", $full_name, $email, $phone, $hash, $role, $hostel_id);
             if ($stmt->execute()) {
+                $new_id = (int)$conn->insert_id;
+                log_action($conn, 'create', 'staff', $new_id,
+                    "Created staff: $full_name ($email), role=$role" . ($hostel_id ? ", hostel_id=$hostel_id" : ""));
                 $_SESSION['flash_success'] = "Staff account created successfully.";
             } else {
                 $_SESSION['flash_error'] = "Error: " . $conn->error;
@@ -97,6 +97,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_staff'])) {
     } else {
         $conn->query("UPDATE staff SET full_name='$fn', email='$em', phone='$ph', role='$rl', hostel_id=$hid, status='$st' WHERE id=$id");
     }
+
+    log_action($conn, 'update', 'staff', $id,
+        "Updated staff: $full_name ($email), role=$role, status=$status" . (!empty($new_pass) ? " (password changed)" : ""));
+
     $_SESSION['flash_success'] = "Staff updated successfully.";
     header("Location: manage-staff.php");
     exit;
@@ -108,10 +112,15 @@ if (isset($_GET['toggle'])) {
     if ($id === $admin_id) {
         $_SESSION['flash_error'] = "You cannot deactivate your own account.";
     } else {
-        $s = $conn->query("SELECT status FROM staff WHERE id=$id")->fetch_assoc();
+        $s = $conn->query("SELECT status, full_name, email FROM staff WHERE id=$id")->fetch_assoc();
         if ($s) {
             $new = $s['status'] === 'active' ? 'inactive' : 'active';
             $conn->query("UPDATE staff SET status='$new' WHERE id=$id");
+            log_action($conn,
+                $new === 'inactive' ? 'suspend' : 'reactivate',
+                'staff', $id,
+                "Staff {$s['full_name']} ({$s['email']}) set to '$new'"
+            );
             $_SESSION['flash_success'] = "Staff status changed to $new.";
         }
     }
@@ -125,7 +134,10 @@ if (isset($_GET['delete'])) {
     if ($id === $admin_id) {
         $_SESSION['flash_error'] = "You cannot delete your own account.";
     } else {
+        $s = $conn->query("SELECT full_name, email FROM staff WHERE id=$id")->fetch_assoc();
         $conn->query("DELETE FROM staff WHERE id=$id");
+        log_action($conn, 'delete', 'staff', $id,
+            "Deleted staff: " . ($s['full_name'] ?? "ID $id") . " (" . ($s['email'] ?? 'unknown') . ")");
         $_SESSION['flash_success'] = "Staff account deleted.";
     }
     header("Location: manage-staff.php");
@@ -148,15 +160,13 @@ $stats = $conn->query("
     FROM staff
 ")->fetch_assoc();
 
-$total_staff   = (int)($stats['total']      ?? 0);
-$active_staff  = (int)($stats['active']     ?? 0);
-$inactive_staff= (int)($stats['inactive']   ?? 0);
-$total_admins  = (int)($stats['admins']     ?? 0);
-$total_wardens = (int)($stats['wardens']    ?? 0);
-$total_regular = (int)($stats['staff_count']?? 0);
-
-// Active percentage
-$active_pct = $total_staff > 0 ? ($active_staff / $total_staff) * 100 : 0;
+$total_staff    = (int)($stats['total']      ?? 0);
+$active_staff   = (int)($stats['active']     ?? 0);
+$inactive_staff = (int)($stats['inactive']   ?? 0);
+$total_admins   = (int)($stats['admins']     ?? 0);
+$total_wardens  = (int)($stats['wardens']    ?? 0);
+$total_regular  = (int)($stats['staff_count']?? 0);
+$active_pct     = $total_staff > 0 ? ($active_staff / $total_staff) * 100 : 0;
 
 // ===== FETCH DATA =====
 $staff_list = $conn->query("
@@ -168,47 +178,33 @@ $staff_list = $conn->query("
 
 $hostels = $conn->query("SELECT id, name FROM hostels WHERE status='active' ORDER BY name");
 
-// ===== INCLUDE HEADER =====
 include 'header.php';
 ?>
 <div class="content-wrapper" id="contentWrapper">
 
-<!-- ============ STATISTICS CARDS ============ -->
 <div class="row g-3 mb-4">
     <div class="col-lg-3 col-md-6">
         <div class="stat-card">
             <div class="stat-icon bg-gradient-blue"><i class="fas fa-user-tie"></i></div>
-            <div class="stat-info">
-                <h3><?= number_format($total_staff) ?></h3>
-                <p>Total Staff</p>
-            </div>
+            <div class="stat-info"><h3><?= number_format($total_staff) ?></h3><p>Total Staff</p></div>
         </div>
     </div>
     <div class="col-lg-3 col-md-6">
         <div class="stat-card">
             <div class="stat-icon bg-gradient-green"><i class="fas fa-user-check"></i></div>
-            <div class="stat-info">
-                <h3><?= number_format($active_staff) ?></h3>
-                <p>Active Staff</p>
-            </div>
+            <div class="stat-info"><h3><?= number_format($active_staff) ?></h3><p>Active Staff</p></div>
         </div>
     </div>
     <div class="col-lg-3 col-md-6">
         <div class="stat-card">
             <div class="stat-icon bg-gradient-red"><i class="fas fa-user-shield"></i></div>
-            <div class="stat-info">
-                <h3><?= number_format($total_admins) ?></h3>
-                <p>Administrators</p>
-            </div>
+            <div class="stat-info"><h3><?= number_format($total_admins) ?></h3><p>Administrators</p></div>
         </div>
     </div>
     <div class="col-lg-3 col-md-6">
         <div class="stat-card">
             <div class="stat-icon bg-gradient-orange"><i class="fas fa-user-graduate"></i></div>
-            <div class="stat-info">
-                <h3><?= number_format($total_wardens) ?></h3>
-                <p>Wardens</p>
-            </div>
+            <div class="stat-info"><h3><?= number_format($total_wardens) ?></h3><p>Wardens</p></div>
         </div>
     </div>
 </div>
@@ -217,19 +213,13 @@ include 'header.php';
     <div class="col-lg-4 col-md-6">
         <div class="stat-card">
             <div class="stat-icon bg-gradient-teal"><i class="fas fa-users-cog"></i></div>
-            <div class="stat-info">
-                <h3><?= number_format($total_regular) ?></h3>
-                <p>Regular Staff</p>
-            </div>
+            <div class="stat-info"><h3><?= number_format($total_regular) ?></h3><p>Regular Staff</p></div>
         </div>
     </div>
     <div class="col-lg-4 col-md-6">
         <div class="stat-card">
             <div class="stat-icon bg-gradient-purple"><i class="fas fa-user-slash"></i></div>
-            <div class="stat-info">
-                <h3><?= number_format($inactive_staff) ?></h3>
-                <p>Inactive Staff</p>
-            </div>
+            <div class="stat-info"><h3><?= number_format($inactive_staff) ?></h3><p>Inactive Staff</p></div>
         </div>
     </div>
     <div class="col-lg-4 col-md-12">
@@ -250,7 +240,6 @@ include 'header.php';
     </div>
 </div>
 
-<!-- ============ STAFF TABLE ============ -->
 <div class="card">
     <div class="card-header">
         <h3 class="card-title"><i class="fas fa-user-tie"></i>Staff Accounts (<?= $staff_list ? $staff_list->num_rows : 0 ?>)</h3>
@@ -265,13 +254,8 @@ include 'header.php';
             <table class="table">
                 <thead>
                     <tr>
-                        <th>Name</th>
-                        <th>Email</th>
-                        <th>Phone</th>
-                        <th>Role</th>
-                        <th>Assigned Hostel</th>
-                        <th>Last Login</th>
-                        <th>Status</th>
+                        <th>Name</th><th>Email</th><th>Phone</th><th>Role</th>
+                        <th>Assigned Hostel</th><th>Last Login</th><th>Status</th>
                         <th style="width:200px;">Actions</th>
                     </tr>
                 </thead>
@@ -292,11 +276,7 @@ include 'header.php';
                         <td style="font-size:0.82rem;color:#6c757d;">
                             <?= $s['last_login'] ? date('d M Y, H:i', strtotime($s['last_login'])) : 'Never' ?>
                         </td>
-                        <td>
-                            <span class="badge bg-<?= $s['status'] === 'active' ? 'success' : 'secondary' ?>">
-                                <?= ucfirst($s['status']) ?>
-                            </span>
-                        </td>
+                        <td><span class="badge bg-<?= $s['status'] === 'active' ? 'success' : 'secondary' ?>"><?= ucfirst($s['status']) ?></span></td>
                         <td>
                             <button class="btn btn-sm btn-outline-secondary"
                                     onclick='openEdit(<?= htmlspecialchars(json_encode([
@@ -337,7 +317,6 @@ include 'header.php';
     </div>
 </div>
 
-<!-- ============ ADD/EDIT MODAL ============ -->
 <div class="modal fade" id="staffModal" tabindex="-1">
     <div class="modal-dialog modal-lg modal-dialog-centered">
         <div class="modal-content" style="border-radius:16px;border:none;">
@@ -348,20 +327,10 @@ include 'header.php';
                 </div>
                 <div class="modal-body p-4">
                     <input type="hidden" name="id" id="staffId">
-
                     <div class="row g-3">
-                        <div class="col-md-6">
-                            <label class="form-label">Full Name *</label>
-                            <input type="text" name="full_name" id="fullName" class="form-control" required>
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label">Email *</label>
-                            <input type="email" name="email" id="staffEmail" class="form-control" required>
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label">Phone</label>
-                            <input type="text" name="phone" id="staffPhone" class="form-control">
-                        </div>
+                        <div class="col-md-6"><label class="form-label">Full Name *</label><input type="text" name="full_name" id="fullName" class="form-control" required></div>
+                        <div class="col-md-6"><label class="form-label">Email *</label><input type="email" name="email" id="staffEmail" class="form-control" required></div>
+                        <div class="col-md-6"><label class="form-label">Phone</label><input type="text" name="phone" id="staffPhone" class="form-control"></div>
                         <div class="col-md-6">
                             <label class="form-label">Role *</label>
                             <select name="role" id="staffRole" class="form-select" required onchange="toggleHostelField()">
@@ -415,38 +384,31 @@ function toggleHostelField() {
     const role = document.getElementById('staffRole').value;
     document.getElementById('hostelField').style.display = (role === 'warden' || role === 'staff') ? '' : 'none';
 }
-
 function setFormMode(mode) {
     const form = document.getElementById('staffForm');
     form.querySelector('[name="add_staff"]')?.remove();
     form.querySelector('[name="edit_staff"]')?.remove();
-
     const hidden = document.createElement('input');
     hidden.type = 'hidden';
     hidden.name = (mode === 'add') ? 'add_staff' : 'edit_staff';
     hidden.value = '1';
     form.appendChild(hidden);
 }
-
 function openAdd() {
     document.getElementById('modalTitle').innerHTML = '<i class="fas fa-plus me-2"></i>Add Staff Account';
     document.getElementById('staffForm').reset();
     document.getElementById('staffId').value = '';
-
     document.getElementById('passwordField').style.display = '';
     document.getElementById('staffPassword').required = true;
     document.getElementById('staffPassword').disabled = false;
     document.getElementById('passLabel').textContent = 'Password *';
     document.getElementById('passHint').textContent = 'Minimum 6 characters';
-
     document.getElementById('newPassField').style.display = 'none';
     document.getElementById('statusField').style.display = 'none';
     document.getElementById('submitText').textContent = 'Create Account';
-
     setFormMode('add');
     toggleHostelField();
 }
-
 function openEdit(s) {
     document.getElementById('modalTitle').innerHTML = '<i class="fas fa-edit me-2"></i>Edit Staff Account';
     document.getElementById('staffId').value = s.id;
@@ -456,20 +418,118 @@ function openEdit(s) {
     document.getElementById('staffRole').value = s.role || 'staff';
     document.getElementById('staffHostel').value = s.hostel_id || '';
     document.getElementById('staffStatus').value = s.status || 'active';
-
     document.getElementById('passwordField').style.display = 'none';
     document.getElementById('staffPassword').required = false;
     document.getElementById('staffPassword').disabled = true;
-
     document.getElementById('newPassField').style.display = '';
     document.getElementById('statusField').style.display = '';
     document.getElementById('submitText').textContent = 'Update Account';
-
     setFormMode('edit');
     toggleHostelField();
-
     new bootstrap.Modal(document.getElementById('staffModal')).show();
 }
 </script>
 
+<script>
+/* ========== UNIVERSAL SIDEBAR + ANIMATIONS ========== */
+document.addEventListener('DOMContentLoaded', function() {
+    const sidebar  = document.getElementById('mainSidebar');
+    const toggleBtn = document.getElementById('sidebarToggle');
+    const closeBtn = document.getElementById('sidebarClose');
+    const overlay  = document.getElementById('sidebarOverlay');
+    const body     = document.body;
+
+    function openSidebar() {
+        if (!sidebar) return;
+        sidebar.classList.add('open');
+        overlay?.classList.add('active');
+        body.classList.add('sidebar-open');
+        body.style.overflow = 'hidden';
+        if (toggleBtn) toggleBtn.innerHTML = '<i class="fas fa-times"></i>';
+    }
+    function closeSidebar() {
+        if (!sidebar) return;
+        sidebar.classList.remove('open');
+        overlay?.classList.remove('active');
+        body.classList.remove('sidebar-open');
+        body.style.overflow = '';
+        if (toggleBtn) toggleBtn.innerHTML = '<i class="fas fa-bars"></i>';
+    }
+    function toggleSidebar() {
+        if (sidebar?.classList.contains('open')) closeSidebar();
+        else openSidebar();
+    }
+
+    toggleBtn?.addEventListener('click', toggleSidebar);
+    closeBtn?.addEventListener('click', closeSidebar);
+    overlay?.addEventListener('click', closeSidebar);
+
+    // ESC key closes sidebar
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') closeSidebar();
+    });
+
+    // Auto-close on link click (mobile)
+    if (window.innerWidth <= 991.98) {
+        document.querySelectorAll('.nav-sidebar .nav-link').forEach(link => {
+            link.addEventListener('click', () => {
+                if (!link.closest('.has-treeview')) {
+                    setTimeout(closeSidebar, 200);
+                }
+            });
+        });
+    }
+
+    // Handle resize
+    let resizeTimer;
+    window.addEventListener('resize', () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+            if (window.innerWidth >= 992) {
+                sidebar?.classList.remove('open');
+                overlay?.classList.remove('active');
+                body.classList.remove('sidebar-open');
+                body.style.overflow = '';
+                if (toggleBtn) toggleBtn.innerHTML = '<i class="fas fa-bars"></i>';
+            }
+        }, 200);
+    });
+
+    // Treeview toggle
+    document.querySelectorAll('.has-treeview > .nav-link').forEach(link => {
+        link.addEventListener('click', function(e) {
+            e.preventDefault();
+            const parent = this.closest('.has-treeview');
+            const submenu = parent.querySelector('.nav-treeview');
+            document.querySelectorAll('.has-treeview').forEach(item => {
+                if (item !== parent) {
+                    item.classList.remove('menu-open');
+                    item.querySelector('.nav-treeview')?.classList.remove('show');
+                }
+            });
+            parent.classList.toggle('menu-open');
+            submenu?.classList.toggle('show');
+        });
+    });
+
+    // Add animation to table rows and cards on scroll (IntersectionObserver)
+    if ('IntersectionObserver' in window) {
+        const io = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.style.opacity = '1';
+                    entry.target.style.transform = 'translateY(0)';
+                    io.unobserve(entry.target);
+                }
+            });
+        }, { threshold: 0.05 });
+
+        document.querySelectorAll('.card, .stat-card').forEach(el => {
+            if (el.dataset.observed) return;
+            el.dataset.observed = '1';
+            io.observe(el);
+        });
+    }
+});
+</script>
 <?php include 'footer.php'; ?>

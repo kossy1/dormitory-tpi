@@ -1,16 +1,14 @@
 <?php
 session_start();
+include '../config/db.php';
+include 'log_action.php';
 
-// Regenerate session ID to prevent fixation
-session_regenerate_id(true);
+if (isset($_SESSION['admin_id'])) {
+    log_action($conn, 'logout', 'admin', (int)$_SESSION['admin_id'],
+        "Admin " . ($_SESSION['admin_name'] ?? 'unknown') . " logged out");
+}
 
-// Clear all session data
-$_SESSION = [];
-
-// Destroy session
+session_unset();
 session_destroy();
-
-// Redirect
-header("Location: ../admin/login.php"); // adjust path for student/admin
+header("Location: login.php");
 exit;
-?>

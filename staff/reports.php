@@ -6,40 +6,61 @@ if (!isset($_SESSION['staff_id'])) { header("Location: login.php"); exit; }
 $page_title = 'Reports & Analytics';
 $page_icon = 'fa-chart-line';
 
-// Revenue by month (last 6 months)
+// ===== DETECT which date column exists on payments =====
+$payments_date_col = 'paid_at'; // default
+$check = $conn->query("SHOW COLUMNS FROM payments LIKE 'paid_at'");
+if (!$check || $check->num_rows === 0) {
+    // Fallback to created_at if paid_at doesn't exist
+    $payments_date_col = 'created_at';
+}
+
+// ===== Revenue by month (last 6 months) =====
 $revenue_by_month = $conn->query("
-    SELECT DATE_FORMAT(paid_at, '%Y-%m') AS ym, 
-           DATE_FORMAT(paid_at, '%b %Y') AS label,
+    SELECT DATE_FORMAT($payments_date_col, '%Y-%m') AS ym, 
+           DATE_FORMAT($payments_date_col, '%b %Y') AS label,
            SUM(amount) AS total, COUNT(*) AS count
     FROM payments
-    WHERE status='completed' AND paid_at >= DATE_SUB(NOW(), INTERVAL 6 MONTH)
-    GROUP BY ym ORDER BY ym ASC
+    WHERE status='completed' 
+      AND $payments_date_col >= DATE_SUB(NOW(), INTERVAL 6 MONTH)
+      AND $payments_date_col IS NOT NULL
+    GROUP BY ym 
+    ORDER BY ym ASC
 ");
 
-// Occupancy by hostel
+// ===== Occupancy by hostel =====
 $occupancy = $conn->query("
     SELECT h.name,
            COALESCE(SUM(r.capacity),0) AS capacity,
-           (SELECT COUNT(*) FROM allocations a JOIN rooms r2 ON a.room_id=r2.id 
+           (SELECT COUNT(*) FROM allocations a 
+            JOIN rooms r2 ON a.room_id=r2.id 
             WHERE r2.hostel_id=h.id AND a.status='active') AS occupied
     FROM hostels h
     LEFT JOIN rooms r ON r.hostel_id=h.id
     WHERE h.status='active'
-    GROUP BY h.id ORDER BY h.name
+    GROUP BY h.id 
+    ORDER BY h.name
 ");
 
-// Bed spacing distribution
+// ===== Bed spacing distribution =====
 $spacing_dist = $conn->query("
     SELECT bed_spacing, COUNT(*) AS cnt, SUM(capacity) AS total_beds
-    FROM rooms GROUP BY bed_spacing ORDER BY cnt DESC
+    FROM rooms 
+    GROUP BY bed_spacing 
+    ORDER BY cnt DESC
 ");
 
-// Gender distribution
+// ===== Gender distribution =====
 $gender_dist = $conn->query("
     SELECT gender, COUNT(*) AS cnt FROM students GROUP BY gender
 ");
 
-include 'includes/header.php';
+// ===== Totals =====
+$total_collected = (float)($conn->query("SELECT COALESCE(SUM(amount),0) s FROM payments WHERE status='completed'")->fetch_assoc()['s'] ?? 0);
+$total_pending   = (float)($conn->query("SELECT COALESCE(SUM(amount),0) s FROM payments WHERE status='pending'")->fetch_assoc()['s'] ?? 0);
+$total_students  = (int)($conn->query("SELECT COUNT(*) c FROM students")->fetch_assoc()['c'] ?? 0);
+$total_allocated = (int)($conn->query("SELECT COUNT(*) c FROM allocations WHERE status='active'")->fetch_assoc()['c'] ?? 0);
+
+include 'header.php';
 ?>
 
 <div class="row g-3">

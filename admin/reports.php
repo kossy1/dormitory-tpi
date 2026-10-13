@@ -6,311 +6,339 @@ if (!isset($_SESSION['admin_id'])) {
 }
 
 include '../config/db.php';
+include 'log_action.php';
 
-$report_type = $_GET['type'] ?? 'overview';
-$date_from = $_GET['date_from'] ?? date('Y-m-01'); // First day of current month
-$date_to = $_GET['date_to'] ?? date('Y-m-d');       // Today
+$page_title = 'Reports & Analytics';
 
-// ========== OVERVIEW STATISTICS ==========
-$total_students = $conn->query("SELECT COUNT(*) FROM students")->fetch_row()[0] ?? 0;
-$active_students = $conn->query("SELECT COUNT(*) FROM students WHERE status='active'")->fetch_row()[0] ?? 0;
-$total_rooms = $conn->query("SELECT COUNT(*) FROM rooms")->fetch_row()[0] ?? 0;
-$occupied_rooms = $conn->query("SELECT COUNT(*) FROM rooms WHERE status='occupied'")->fetch_row()[0] ?? 0;
-$available_rooms = $total_rooms - $occupied_rooms;
-$total_hostels = $conn->query("SELECT COUNT(*) FROM hostels")->fetch_row()[0] ?? 0;
-$total_revenue = $conn->query("SELECT COALESCE(SUM(amount),0) FROM payments WHERE status='completed'")->fetch_row()[0] ?? 0;
-$occupancy_rate = $total_rooms > 0 ? round(($occupied_rooms / $total_rooms) * 100, 1) : 0;
+// ===== OVERVIEW STATS =====
+$total_students   = (int)($conn->query("SELECT COUNT(*) c FROM students")->fetch_assoc()['c'] ?? 0);
+$allocated        = (int)($conn->query("SELECT COUNT(*) c FROM allocations WHERE status='active'")->fetch_assoc()['c'] ?? 0);
+$unallocated      = max(0, $total_students - $allocated);
+$total_rooms      = (int)($conn->query("SELECT COUNT(*) c FROM rooms")->fetch_assoc()['c'] ?? 0);
+$available_rooms  = (int)($conn->query("SELECT COUNT(*) c FROM rooms WHERE status='available'")->fetch_assoc()['c'] ?? 0);
+$occupied_rooms   = (int)($conn->query("SELECT COUNT(*) c FROM rooms WHERE status='occupied'")->fetch_assoc()['c'] ?? 0);
+$total_hostels    = (int)($conn->query("SELECT COUNT(*) c FROM hostels WHERE status='active'")->fetch_assoc()['c'] ?? 0);
+$total_capacity   = (int)($conn->query("SELECT COALESCE(SUM(capacity),0) c FROM rooms")->fetch_assoc()['c'] ?? 0);
+$occupancy_rate   = $total_capacity > 0 ? ($allocated / $total_capacity) * 100 : 0;
 
-// ========== PAYMENT STATS (by status) ==========
-$payment_stats = [];
-$res = $conn->query("SELECT status, COUNT(*) as count, COALESCE(SUM(amount),0) as total FROM payments GROUP BY status");
-if ($res) {
-    while ($row = $res->fetch_assoc()) {
-        $payment_stats[$row['status']] = $row;
-    }
-}
+// Payments
+$payments_date_col = 'paid_at';
+$chk = $conn->query("SHOW COLUMNS FROM payments LIKE 'paid_at'");
+if (!$chk || $chk->num_rows === 0) $payments_date_col = 'created_at';
 
-// ========== MONTHLY REVENUE (last 12 months) ==========
-$monthly_revenue = [];
-$res = $conn->query("
-    SELECT 
-        DATE_FORMAT(created_at, '%Y-%m') as month,
-        COUNT(*) as count,
-        COALESCE(SUM(amount), 0) as total
-    FROM payments 
-    WHERE status='completed' 
-      AND created_at >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
-    GROUP BY DATE_FORMAT(created_at, '%Y-%m')
-    ORDER BY month ASC
+$total_collected = (float)($conn->query("SELECT COALESCE(SUM(amount),0) s FROM payments WHERE status='completed'")->fetch_assoc()['s'] ?? 0);
+$total_pending   = (float)($conn->query("SELECT COALESCE(SUM(amount),0) s FROM payments WHERE status='pending'")->fetch_assoc()['s'] ?? 0);
+$total_failed    = (float)($conn->query("SELECT COALESCE(SUM(amount),0) s FROM payments WHERE status='failed'")->fetch_assoc()['s'] ?? 0);
+
+// Revenue by month (last 6)
+$revenue_by_month = $conn->query("
+    SELECT DATE_FORMAT($payments_date_col, '%Y-%m') AS ym,
+           DATE_FORMAT($payments_date_col, '%b %Y') AS label,
+           SUM(amount) AS total, COUNT(*) AS count
+    FROM payments
+    WHERE status='completed'
+      AND $payments_date_col >= DATE_SUB(NOW(), INTERVAL 6 MONTH)
+      AND $payments_date_col IS NOT NULL
+    GROUP BY ym ORDER BY ym ASC
 ");
-if ($res) {
-    while ($row = $res->fetch_assoc()) {
-        $monthly_revenue[$row['month']] = $row;
-    }
-}
 
-// ========== GENDER DISTRIBUTION ==========
-$gender_stats = [];
-$res = $conn->query("SELECT gender, COUNT(*) as count FROM students GROUP BY gender");
-if ($res) {
-    while ($row = $res->fetch_assoc()) {
-        $gender_stats[$row['gender']] = $row['count'];
-    }
-}
-
-// ========== LEVEL DISTRIBUTION ==========
-$level_stats = [];
-$res = $conn->query("SELECT level, COUNT(*) as count FROM students GROUP BY level ORDER BY level");
-if ($res) {
-    while ($row = $res->fetch_assoc()) {
-        $level_stats[$row['level']] = $row['count'];
-    }
-}
-
-// ========== ROOM OCCUPANCY BY HOSTEL ==========
-$hostel_stats = [];
-$res = $conn->query("
-    SELECT h.id, h.name,
-           COUNT(r.id) as total_rooms,
-           SUM(CASE WHEN r.status='occupied' THEN 1 ELSE 0 END) as occupied,
-           SUM(CASE WHEN r.status='available' THEN 1 ELSE 0 END) as available
+// Occupancy by hostel
+$occupancy = $conn->query("
+    SELECT h.name,
+           COALESCE(SUM(r.capacity),0) AS capacity,
+           (SELECT COUNT(*) FROM allocations a 
+            JOIN rooms r2 ON a.room_id=r2.id 
+            WHERE r2.hostel_id=h.id AND a.status='active') AS occupied
     FROM hostels h
-    LEFT JOIN rooms r ON r.hostel_id = h.id
-    GROUP BY h.id, h.name
-    ORDER BY h.name
+    LEFT JOIN rooms r ON r.hostel_id=h.id
+    WHERE h.status='active'
+    GROUP BY h.id ORDER BY h.name
 ");
-if ($res) {
-    while ($row = $res->fetch_assoc()) {
-        $hostel_stats[] = $row;
-    }
-}
 
-// ========== TOP PAYING STUDENTS ==========
-$top_students = [];
-$res = $conn->query("
-    SELECT s.id, s.full_name, s.matric_no,
-           COUNT(p.id) as payment_count,
-           COALESCE(SUM(p.amount), 0) as total_paid
-    FROM students s
-    JOIN payments p ON p.student_id = s.id
-    WHERE p.status = 'completed'
-    GROUP BY s.id, s.full_name, s.matric_no
-    ORDER BY total_paid DESC
-    LIMIT 10
+// Bed spacing distribution
+$spacing_dist = $conn->query("
+    SELECT bed_spacing, COUNT(*) AS cnt, SUM(capacity) AS total_beds
+    FROM rooms GROUP BY bed_spacing ORDER BY cnt DESC
 ");
-if ($res) {
-    while ($row = $res->fetch_assoc()) {
-        $top_students[] = $row;
-    }
-}
 
-// ========== RECENT PAYMENTS (filtered by date) ==========
-$recent_payments = [];
-$stmt = $conn->prepare("
-    SELECT p.*, s.full_name, s.matric_no
-    FROM payments p
-    JOIN students s ON p.student_id = s.id
-    WHERE p.created_at BETWEEN ? AND ?
-    ORDER BY p.created_at DESC
-    LIMIT 20
-");
-$date_from_dt = $date_from . ' 00:00:00';
-$date_to_dt = $date_to . ' 23:59:59';
-$stmt->bind_param("ss", $date_from_dt, $date_to_dt);
-$stmt->execute();
-$res = $stmt->get_result();
-while ($row = $res->fetch_assoc()) {
-    $recent_payments[] = $row;
-}
+// Gender distribution
+$gender_dist = $conn->query("SELECT gender, COUNT(*) AS cnt FROM students GROUP BY gender");
 
-// ========== REQUEST STATS ==========
-$complaints_total = $conn->query("SELECT COUNT(*) FROM complaints")->fetch_row()[0] ?? 0;
-$complaints_pending = $conn->query("SELECT COUNT(*) FROM complaints WHERE status='pending'")->fetch_row()[0] ?? 0;
-$maintenance_total = $conn->query("SELECT COUNT(*) FROM maintenance_requests")->fetch_row()[0] ?? 0;
-$maintenance_pending = $conn->query("SELECT COUNT(*) FROM maintenance_requests WHERE status='pending'")->fetch_row()[0] ?? 0;
-$refund_total = $conn->query("SELECT COUNT(*) FROM refund_requests")->fetch_row()[0] ?? 0;
-$refund_pending = $conn->query("SELECT COUNT(*) FROM refund_requests WHERE status='pending'")->fetch_row()[0] ?? 0;
-$room_change_total = $conn->query("SELECT COUNT(*) FROM room_change_requests")->fetch_row()[0] ?? 0;
-$room_change_pending = $conn->query("SELECT COUNT(*) FROM room_change_requests WHERE status='pending'")->fetch_row()[0] ?? 0;
+// Level distribution
+$level_dist = $conn->query("SELECT level, COUNT(*) AS cnt FROM students GROUP BY level ORDER BY level");
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Reports & Analytics - Dormitory MS</title>
+    <title>Reports - Dormitory MS</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<link rel="preconnect" href="https://cdnjs.cloudflare.com">
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Inter', sans-serif;
-            background: #f4f6f9;
-            overflow-x: hidden;
-        }
+        /* ========== ANIMATIONS & GLOBAL ENHANCEMENTS ========== */
+* { -webkit-tap-highlight-color: transparent; }
 
-        .sidebar-toggle-btn {
-            position: fixed; top: 12px; left: 12px; z-index: 1050;
-            background: #1a3a6b; color: white; border: none;
-            border-radius: 10px; padding: 12px 16px; display: none;
-            box-shadow: 0 4px 20px rgba(26,58,107,0.3);
-        }
-        .sidebar-toggle-btn:hover { background: #0d1b3e; }
-        .sidebar-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1039; }
-        .sidebar-overlay.active { display: block; }
+@keyframes fadeInUp {
+    from { opacity: 0; transform: translateY(20px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+@keyframes slideInLeft {
+    from { opacity: 0; transform: translateX(-30px); }
+    to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes slideInRight {
+    from { opacity: 0; transform: translateX(30px); }
+    to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes pulse {
+    0%, 100% { transform: scale(1); }
+    50%      { transform: scale(1.05); }
+}
+@keyframes shimmer {
+    0%   { background-position: -500px 0; }
+    100% { background-position: 500px 0; }
+}
+@keyframes bounceIn {
+    0%   { opacity: 0; transform: scale(0.85); }
+    60%  { opacity: 1; transform: scale(1.03); }
+    100% { transform: scale(1); }
+}
 
-        .main-sidebar {
-            position: fixed; top: 0; left: 0; height: 100vh; width: 280px;
-            background: linear-gradient(180deg, #1a3a6b 0%, #0d1b3e 100%);
-            z-index: 1040; overflow-y: auto; transition: transform 0.3s ease;
-            transform: translateX(-100%);
-        }
-        .main-sidebar.open { transform: translateX(0); }
-        .sidebar-brand {
-            padding: 20px 18px 15px; border-bottom: 1px solid rgba(255,255,255,0.08);
-            display: flex; align-items: center; gap: 12px;
-        }
-        .sidebar-brand img { width: 45px; height: 45px; background: white; padding: 5px; border-radius: 10px; }
-        .sidebar-brand .brand-text { color: white; font-weight: 700; font-size: 1.1rem; line-height: 1.2; }
-        .sidebar-brand .brand-text small { display: block; font-size: 0.7rem; opacity: 0.7; font-weight: 300; }
-        .sidebar-close-btn {
-            display: none; position: absolute; top: 12px; right: 12px;
-            background: rgba(255,255,255,0.1); color: white; border: none;
-            border-radius: 50%; width: 36px; height: 36px;
-        }
-        .user-panel {
-            padding: 18px 20px !important; border-bottom: 1px solid rgba(255,255,255,0.08);
-            display: flex !important; align-items: center; gap: 12px;
-        }
-        .user-panel img { width: 42px; height: 42px; border-radius: 50%; }
-        .user-panel a { color: white; font-weight: 600; text-decoration: none; }
-        .user-panel small { color: rgba(255,255,255,0.6); display: block; font-size: 0.75rem; }
+/* Apply to common elements */
+.content-header { animation: fadeInUp 0.5s ease both; }
+.card { animation: fadeInUp 0.5s ease both; }
+.stat-card { animation: bounceIn 0.6s ease both; }
 
-        .nav-sidebar { padding: 8px 0; list-style: none; }
-        .nav-sidebar .nav-item { margin: 2px 8px; }
-        .nav-sidebar .nav-link {
-            color: rgba(255,255,255,0.75); padding: 10px 16px; border-radius: 10px;
-            display: flex; align-items: center; gap: 12px; text-decoration: none;
-            transition: all 0.3s ease;
-        }
-        .nav-sidebar .nav-link:hover { color: white; background: rgba(255,255,255,0.1); }
-        .nav-sidebar .nav-link.active { color: white; background: rgba(255,215,0,0.15); border-left: 3px solid #ffd700; }
-        .nav-sidebar .nav-icon { width: 22px; text-align: center; color: rgba(255,255,255,0.6); }
-        .nav-sidebar .nav-link.active .nav-icon { color: #ffd700; }
-        .nav-treeview { padding-left: 15px; max-height: 0; overflow: hidden; transition: max-height 0.3s ease; }
-        .nav-treeview.show { max-height: 500px; }
-        .nav-treeview .nav-link { padding: 8px 16px 8px 35px; font-size: 0.85rem; color: rgba(255,255,255,0.6); }
+/* Stagger stat cards */
+.row > [class*="col-"]:nth-child(1) .stat-card { animation-delay: 0.05s; }
+.row > [class*="col-"]:nth-child(2) .stat-card { animation-delay: 0.10s; }
+.row > [class*="col-"]:nth-child(3) .stat-card { animation-delay: 0.15s; }
+.row > [class*="col-"]:nth-child(4) .stat-card { animation-delay: 0.20s; }
+.row > [class*="col-"]:nth-child(5) .stat-card { animation-delay: 0.25s; }
+.row > [class*="col-"]:nth-child(6) .stat-card { animation-delay: 0.30s; }
 
-        .content-wrapper { min-height: 100vh; padding: 20px; transition: margin-left 0.3s ease; }
+.table tbody tr { animation: fadeIn 0.4s ease both; }
+.table tbody tr:nth-child(1)  { animation-delay: 0.02s; }
+.table tbody tr:nth-child(2)  { animation-delay: 0.04s; }
+.table tbody tr:nth-child(3)  { animation-delay: 0.06s; }
+.table tbody tr:nth-child(4)  { animation-delay: 0.08s; }
+.table tbody tr:nth-child(5)  { animation-delay: 0.10s; }
+.table tbody tr:nth-child(6)  { animation-delay: 0.12s; }
+.table tbody tr:nth-child(7)  { animation-delay: 0.14s; }
+.table tbody tr:nth-child(8)  { animation-delay: 0.16s; }
+.table tbody tr:nth-child(9)  { animation-delay: 0.18s; }
+.table tbody tr:nth-child(10) { animation-delay: 0.20s; }
 
-        .content-header { padding-bottom: 15px; border-bottom: 2px solid #e9ecef; margin-bottom: 20px; }
-        .content-header h1 { font-weight: 700; font-size: 1.8rem; color: #1a2a4a; }
+/* Hover enhancements */
+.card { transition: transform 0.3s ease, box-shadow 0.3s ease; }
+.card:hover { transform: translateY(-3px); box-shadow: 0 12px 35px rgba(0,0,0,0.1); }
+.btn { transition: all 0.25s ease; position: relative; overflow: hidden; }
+.btn:hover { transform: translateY(-2px); }
+.btn:active { transform: translateY(0) scale(0.98); }
 
-        .card { border: none; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); margin-bottom: 20px; }
-        .card-header { background: white; border-bottom: 2px solid #f0f2f5; padding: 18px 25px; border-radius: 16px 16px 0 0 !important; }
-        .card-body { padding: 25px; }
-        .card-title { font-weight: 700; font-size: 1.1rem; color: #1a2a4a; }
+/* Table row hover */
+.table tbody tr { transition: background 0.2s ease, transform 0.2s ease; }
+.table tbody tr:hover { background: #f0f4fa !important; }
 
-        .stat-card {
-            border: none; border-radius: 16px; padding: 22px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.06); position: relative;
-            overflow: hidden; transition: all 0.3s ease;
-            animation: fadeInUp 0.5s ease;
-            height: 100%;
-        }
-        .stat-card:hover { transform: translateY(-5px); box-shadow: 0 8px 30px rgba(0,0,0,0.12); }
-        .stat-card .stat-icon {
-            width: 55px; height: 55px; border-radius: 12px;
-            display: flex; align-items: center; justify-content: center;
-            font-size: 1.6rem; color: white; margin-bottom: 12px;
-        }
-        .stat-card .stat-value { font-size: 1.9rem; font-weight: 800; margin: 0; color: #1a2a4a; line-height: 1.2; }
-        .stat-card .stat-label { color: #6c757d; font-size: 0.9rem; margin: 5px 0 0; font-weight: 500; }
-        .stat-card .stat-bg-icon {
-            position: absolute; right: -10px; bottom: -10px;
-            font-size: 5rem; opacity: 0.05; pointer-events: none;
-        }
-        .stat-card.bg-primary .stat-icon { background: linear-gradient(135deg, #1a3a6b, #0d1b3e); }
-        .stat-card.bg-success .stat-icon { background: linear-gradient(135deg, #28a745, #20c997); }
-        .stat-card.bg-warning .stat-icon { background: linear-gradient(135deg, #ffc107, #fd7e14); }
-        .stat-card.bg-info .stat-icon { background: linear-gradient(135deg, #0d6efd, #0a58ca); }
-        .stat-card.bg-danger .stat-icon { background: linear-gradient(135deg, #dc3545, #e74c3c); }
+/* Modal animations */
+.modal.fade .modal-dialog {
+    transform: scale(0.9);
+    transition: transform 0.3s ease-out;
+}
+.modal.show .modal-dialog { transform: scale(1); }
 
-        @keyframes fadeInUp {
-            from { opacity: 0; transform: translateY(30px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
+/* Sidebar smoothness */
+.main-sidebar { will-change: transform; }
 
-        .filter-bar {
-            background: white; border-radius: 16px; padding: 18px 22px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.06); margin-bottom: 20px;
-            display: flex; gap: 15px; flex-wrap: wrap; align-items: end;
-        }
-        .filter-bar .form-group { flex: 1; min-width: 180px; }
-        .filter-bar label { font-size: 0.82rem; font-weight: 600; color: #1a2a4a; margin-bottom: 5px; display: block; }
-        .filter-bar .form-control { border: 2px solid #e9ecef; border-radius: 10px; padding: 9px 14px; font-size: 0.9rem; }
-        .filter-bar .form-control:focus { border-color: #1a3a6b; box-shadow: 0 0 0 4px rgba(26,58,107,0.12); }
+/* Loading shimmer on images */
+img[loading="lazy"] {
+    background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+    background-size: 500px 100%;
+    animation: shimmer 1.5s infinite linear;
+}
 
-        .btn-primary {
-            background: linear-gradient(135deg, #1a3a6b, #0d1b3e);
-            border: none; border-radius: 10px; padding: 10px 22px;
-            font-weight: 600; color: white; transition: all 0.3s ease;
-        }
-        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(26,58,107,0.4); color: white; }
-        .btn-success {
-            background: linear-gradient(135deg, #28a745, #20c997);
-            border: none; border-radius: 10px; padding: 10px 22px;
-            font-weight: 600; color: white;
-        }
-        .btn-success:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(40,167,69,0.4); color: white; }
-        .btn-outline-secondary { border: 2px solid #e9ecef; border-radius: 10px; padding: 10px 20px; font-weight: 600; }
+/* Focus outline for accessibility */
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible {
+    outline: 2px solid #1a3a6b;
+    outline-offset: 2px;
+}
 
-        .table { margin-bottom: 0; }
-        .table thead th {
-            background: #f8f9fa; color: #1a2a4a; font-weight: 600;
-            font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.5px;
-            border-bottom: 2px solid #e9ecef; padding: 12px 15px;
-        }
-        .table tbody td { padding: 12px 15px; border-bottom: 1px solid #f0f2f5; font-size: 0.9rem; vertical-align: middle; }
-        .table tbody tr:hover { background: #f8f9fa; }
+/* Reduce motion for users who prefer it */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}
 
-        .badge { padding: 6px 12px; border-radius: 20px; font-weight: 600; font-size: 0.72rem; }
-        .badge.bg-success { background: #28a745 !important; }
-        .badge.bg-warning { background: #ffc107 !important; color: #333; }
-        .badge.bg-danger { background: #dc3545 !important; }
-        .badge.bg-info { background: #17a2b8 !important; }
-        .badge.bg-secondary { background: #6c757d !important; }
+/* ========== MOBILE RESPONSIVENESS ========== */
+@media (max-width: 991.98px) {
+    .content-wrapper { padding: 15px !important; padding-top: 75px !important; }
+    .content-header h1 { font-size: 1.4rem !important; }
+    .card-header { padding: 15px 18px !important; }
+    .card-body { padding: 18px !important; }
+    .stat-card { padding: 16px !important; gap: 12px !important; }
+    .stat-card .stat-icon { width: 48px !important; height: 48px !important; font-size: 1.25rem !important; }
+    .stat-card .stat-info h3 { font-size: 1.3rem !important; }
+    .stat-card .stat-info p { font-size: 0.78rem !important; }
+}
 
-        .main-footer {
-            background: white; padding: 15px 20px; border-top: 1px solid #e9ecef;
-            text-align: center; font-size: 0.9rem; color: #6c757d; margin-left: 280px;
-        }
+@media (max-width: 767.98px) {
+    .content-header h1 { font-size: 1.25rem !important; }
+    .content-header { padding-bottom: 12px !important; margin-bottom: 15px !important; }
 
-        .progress { height: 8px; border-radius: 4px; background: #e9ecef; }
-        .progress-bar { border-radius: 4px; }
+    .card { border-radius: 12px !important; margin-bottom: 15px !important; }
+    .card-header { padding: 12px 15px !important; }
+    .card-header h3, .card-header .card-title { font-size: 0.95rem !important; }
+    .card-body { padding: 15px !important; }
 
-        @media (min-width: 992px) {
-            .main-sidebar { transform: translateX(0) !important; }
-            .sidebar-toggle-btn, .sidebar-overlay { display: none !important; }
-            .content-wrapper { margin-left: 280px; }
+    /* Make tables scroll horizontally */
+    .table-responsive { -webkit-overflow-scrolling: touch; border-radius: 10px; }
+    .table thead th { font-size: 0.7rem !important; padding: 8px 10px !important; white-space: nowrap; }
+    .table tbody td { font-size: 0.8rem !important; padding: 8px 10px !important; }
+
+    /* Full-width buttons in modals */
+    .modal-footer .btn { width: 100%; margin: 4px 0 !important; }
+    .modal-footer { flex-direction: column; }
+    .modal-footer > * { margin: 4px 0 !important; }
+    .modal-body { padding: 15px !important; }
+    .modal-header { padding: 12px 15px !important; }
+    .modal-header .modal-title { font-size: 1rem !important; }
+
+    /* Stacked stat cards */
+    .stat-card { flex-direction: row !important; padding: 14px !important; }
+    .stat-card .stat-icon { width: 42px !important; height: 42px !important; font-size: 1.1rem !important; }
+    .stat-card .stat-info h3 { font-size: 1.15rem !important; }
+    .stat-card .stat-info p { font-size: 0.72rem !important; margin-top: 2px !important; }
+
+    /* Better form controls on mobile */
+    .form-control, .form-select {
+        font-size: 16px !important; /* Prevents iOS zoom on focus */
+        padding: 10px 14px !important;
+    }
+
+    /* Full-width actions */
+    .d-flex.gap-2.flex-wrap > .btn,
+    .d-flex.gap-1.flex-wrap > .btn { flex: 1 1 auto; min-width: 45%; }
+}
+
+@media (max-width: 575.98px) {
+    .content-wrapper { padding: 10px !important; padding-top: 70px !important; }
+    .content-header h1 { font-size: 1.1rem !important; }
+    .content-header h1 i { font-size: 0.95rem !important; }
+
+    .card { border-radius: 10px !important; }
+    .card-header { padding: 10px 12px !important; }
+    .card-body { padding: 12px !important; }
+
+    .stat-card { padding: 12px !important; gap: 10px !important; }
+    .stat-card .stat-icon { width: 38px !important; height: 38px !important; font-size: 1rem !important; }
+    .stat-card .stat-info h3 { font-size: 1rem !important; }
+    .stat-card .stat-info p { font-size: 0.68rem !important; }
+
+    /* Sidebar takes more width on small screens */
+    .main-sidebar { width: 260px !important; max-width: 85% !important; }
+
+    /* Compact stat grid - 2 per row */
+    .row.g-3 > .col-6 { flex: 0 0 50%; max-width: 50%; }
+
+    /* Make the search form full width */
+    .search-wrapper { width: 100%; }
+    .search-wrapper form { width: 100%; }
+    .search-wrapper .form-control { min-width: 100% !important; }
+
+    /* Compact tables */
+    .table thead th { font-size: 0.65rem !important; padding: 6px 8px !important; }
+    .table tbody td { font-size: 0.75rem !important; padding: 6px 8px !important; }
+}
+
+/* Touch-friendly target sizes */
+@media (hover: none) and (pointer: coarse) {
+    .nav-sidebar .nav-link { padding: 12px 16px !important; }
+    .btn { min-height: 40px; }
+    .btn-sm { min-height: 34px; padding: 6px 12px !important; }
+}
+
+/* Print styles */
+@media print {
+    .main-sidebar, .sidebar-toggle-btn, .sidebar-overlay,
+    .main-footer, .content-header .btn, .card-header .btn { display: none !important; }
+    .content-wrapper { margin-left: 0 !important; padding: 0 !important; }
+    .card { box-shadow: none !important; border: 1px solid #ddd !important; }
+    body { background: white !important; }
+}
+
+        body { font-family:'Inter',sans-serif; background:#f4f6f9; }
+        .sidebar-toggle-btn { position:fixed; top:12px; left:12px; z-index:1050; background:#1a3a6b; color:white; border:none; border-radius:10px; padding:12px 16px; display:none; }
+        .sidebar-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:1039; }
+        .sidebar-overlay.active { display:block; }
+        .main-sidebar { position:fixed; top:0; left:0; height:100vh; width:280px; background:linear-gradient(180deg,#1a3a6b 0%,#0d1b3e 100%); z-index:1040; overflow-y:auto; transition:transform 0.3s ease; transform:translateX(-100%); }
+        .main-sidebar.open { transform:translateX(0); }
+        .sidebar-brand { padding:20px 18px 15px; border-bottom:1px solid rgba(255,255,255,0.08); display:flex; align-items:center; gap:12px; }
+        .sidebar-brand img { width:45px; height:45px; background:white; padding:5px; border-radius:10px; }
+        .sidebar-brand .brand-text { color:white; font-weight:700; font-size:1.1rem; }
+        .sidebar-brand .brand-text small { display:block; font-size:0.7rem; opacity:0.7; font-weight:300; }
+        .sidebar-close-btn { display:none; position:absolute; top:12px; right:12px; background:rgba(255,255,255,0.1); color:white; border:none; border-radius:50%; width:36px; height:36px; }
+        .user-panel { padding:18px 20px !important; border-bottom:1px solid rgba(255,255,255,0.08); display:flex !important; align-items:center; gap:12px; }
+        .user-panel img { width:42px; height:42px; border-radius:50%; }
+        .user-panel a { color:white; font-weight:600; text-decoration:none; }
+        .user-panel small { color:rgba(255,255,255,0.6); display:block; font-size:0.75rem; }
+        .nav-sidebar { padding:8px 0; list-style:none; }
+        .nav-sidebar .nav-item { margin:2px 8px; }
+        .nav-sidebar .nav-link { color:rgba(255,255,255,0.75); padding:10px 16px; border-radius:10px; display:flex; align-items:center; gap:12px; text-decoration:none; }
+        .nav-sidebar .nav-link:hover { color:white; background:rgba(255,255,255,0.1); }
+        .nav-sidebar .nav-link.active { color:white; background:rgba(255,215,0,0.15); border-left:3px solid #ffd700; }
+        .nav-sidebar .nav-icon { width:22px; text-align:center; color:rgba(255,255,255,0.6); }
+        .nav-sidebar .nav-link.active .nav-icon { color:#ffd700; }
+        .nav-treeview { padding-left:15px; max-height:0; overflow:hidden; transition:max-height 0.3s ease; }
+        .nav-treeview.show { max-height:500px; }
+        .nav-treeview .nav-link { padding:8px 16px 8px 35px; font-size:0.85rem; color:rgba(255,255,255,0.6); }
+        .content-wrapper { min-height:100vh; padding:20px; transition:margin-left 0.3s ease; }
+        .content-header { padding-bottom:15px; border-bottom:2px solid #e9ecef; margin-bottom:20px; }
+        .content-header h1 { font-weight:700; font-size:1.8rem; color:#1a2a4a; }
+        .stat-card { background:white; border-radius:16px; padding:22px; box-shadow:0 4px 20px rgba(0,0,0,0.06); display:flex; align-items:center; gap:18px; height:100%; transition:all 0.3s ease; }
+        .stat-card:hover { transform:translateY(-4px); box-shadow:0 12px 35px rgba(0,0,0,0.1); }
+        .stat-card .stat-icon { width:58px; height:58px; border-radius:14px; display:flex; align-items:center; justify-content:center; font-size:1.5rem; color:white; flex-shrink:0; }
+        .stat-card .stat-info h3 { font-weight:800; font-size:1.6rem; color:#1a2a4a; margin:0; }
+        .stat-card .stat-info p { margin:4px 0 0; color:#6c757d; font-size:0.85rem; }
+        .bg-gradient-blue { background:linear-gradient(135deg,#1a3a6b,#2c5aa0) !important; }
+        .bg-gradient-green { background:linear-gradient(135deg,#28a745,#20c997) !important; }
+        .bg-gradient-orange { background:linear-gradient(135deg,#fd7e14,#ffb700) !important; }
+        .bg-gradient-red { background:linear-gradient(135deg,#dc3545,#c82333) !important; }
+        .bg-gradient-purple { background:linear-gradient(135deg,#6f42c1,#8b5cf6) !important; }
+        .bg-gradient-teal { background:linear-gradient(135deg,#17a2b8,#20c997) !important; }
+        .bg-gradient-pink { background:linear-gradient(135deg,#e83e8c,#ff6fa8) !important; }
+        .card { border:none; border-radius:16px; box-shadow:0 4px 20px rgba(0,0,0,0.06); margin-bottom:20px; }
+        .card-header { background:white; border-bottom:2px solid #f0f2f5; padding:18px 25px; border-radius:16px 16px 0 0 !important; }
+        .card-body { padding:25px; }
+        .table { margin:0; }
+        .table thead th { background:#f8f9fa; color:#1a2a4a; font-weight:700; font-size:0.78rem; text-transform:uppercase; letter-spacing:0.5px; border-bottom:2px solid #e9ecef; padding:14px 15px; }
+        .table tbody td { padding:14px 15px; border-bottom:1px solid #f0f2f5; font-size:0.9rem; }
+        .main-footer { background:white; padding:15px 20px; border-top:1px solid #e9ecef; text-align:center; font-size:0.9rem; color:#6c757d; margin-left:280px; }
+        .progress { height:10px; border-radius:5px; background:#e9ecef; }
+        .progress-bar { border-radius:5px; }
+        @media (min-width:992px) {
+            .main-sidebar { transform:translateX(0) !important; }
+            .sidebar-toggle-btn, .sidebar-overlay { display:none !important; }
+            .content-wrapper { margin-left:280px; }
         }
-        @media (max-width: 991.98px) {
-            .sidebar-toggle-btn { display: block; }
-            .main-sidebar.open { transform: translateX(0); }
-            .content-wrapper { margin-left: 0; padding-top: 70px; }
-            .sidebar-close-btn { display: block; }
-            .main-footer { margin-left: 0; }
-        }
-        @media (max-width: 576px) {
-            .content-header h1 { font-size: 1.4rem; }
-            .stat-card { padding: 18px; }
-            .stat-card .stat-value { font-size: 1.5rem; }
-            .stat-card .stat-icon { width: 45px; height: 45px; font-size: 1.3rem; }
-            .card-header, .card-body { padding: 15px 18px; }
-            .filter-bar { padding: 15px; }
-            .btn-primary, .btn-success { width: 100%; }
+        @media (max-width:991.98px) {
+            .sidebar-toggle-btn { display:block; }
+            .main-sidebar.open { transform:translateX(0); }
+            .content-wrapper { margin-left:0; padding-top:70px; }
+            .sidebar-close-btn { display:block; }
+            .main-footer { margin-left:0; }
         }
     </style>
 </head>
@@ -332,13 +360,9 @@ $room_change_pending = $conn->query("SELECT COUNT(*) FROM room_change_requests W
     <ul class="nav nav-pills nav-sidebar flex-column">
         <li class="nav-item"><a href="index.php" class="nav-link"><i class="nav-icon fas fa-tachometer-alt"></i><p>Dashboard</p></a></li>
         <li class="nav-item"><a href="students.php" class="nav-link"><i class="nav-icon fas fa-users"></i><p>Students</p></a></li>
-       <li class="nav-item"><a href="bulk-students.php" class="nav-link active"><i class="nav-icon fas fa-file-upload"></i><p>Bulk Upload</p></a></li>
-          <li class="nav-item">
-    <a href="manage-staff.php" class="nav-link">
-        <i class="nav-icon fas fa-user-tie"></i> Manage Staff
-    </a>
-</li> 
-       <li class="nav-item"><a href="rooms.php" class="nav-link"><i class="nav-icon fas fa-bed"></i><p>Rooms</p></a></li>
+        <li class="nav-item"><a href="bulk-students.php" class="nav-link"><i class="nav-icon fas fa-file-upload"></i><p>Bulk Upload</p></a></li>
+        <li class="nav-item"><a href="manage-staff.php" class="nav-link"><i class="nav-icon fas fa-user-tie"></i><p>Manage Staff</p></a></li>
+        <li class="nav-item"><a href="rooms.php" class="nav-link"><i class="nav-icon fas fa-bed"></i><p>Rooms</p></a></li>
         <li class="nav-item"><a href="post-room.php" class="nav-link"><i class="nav-icon fas fa-plus-square"></i><p>Post Room</p></a></li>
         <li class="nav-item"><a href="hostels.php" class="nav-link"><i class="nav-icon fas fa-building"></i><p>Hostels</p></a></li>
         <li class="nav-item"><a href="allocations.php" class="nav-link"><i class="nav-icon fas fa-door-open"></i><p>Allocations</p></a></li>
@@ -351,283 +375,286 @@ $room_change_pending = $conn->query("SELECT COUNT(*) FROM room_change_requests W
 
 <div class="content-wrapper">
     <section class="content-header">
-        <div class="d-flex flex-wrap align-items-center justify-content-between">
-            <h1><i class="fas fa-chart-line me-2"></i>Reports &amp; Analytics</h1>
-            <button onclick="window.print()" class="btn btn-primary">
-                <i class="fas fa-print me-2"></i>Print Report
-            </button>
-        </div>
+        <h1><i class="fas fa-chart-line me-2"></i>Reports & Analytics</h1>
     </section>
 
-    <!-- FILTER BAR -->
-    <form method="GET" class="filter-bar">
-        <div class="form-group">
-            <label><i class="fas fa-calendar-alt me-1"></i>From Date</label>
-            <input type="date" name="date_from" class="form-control" value="<?= htmlspecialchars($date_from) ?>">
-        </div>
-        <div class="form-group">
-            <label><i class="fas fa-calendar-alt me-1"></i>To Date</label>
-            <input type="date" name="date_to" class="form-control" value="<?= htmlspecialchars($date_to) ?>">
-        </div>
-        <div class="form-group" style="flex: 0 0 auto;">
-            <button type="submit" class="btn btn-primary"><i class="fas fa-filter me-2"></i>Apply Filter</button>
-        </div>
-        <div class="form-group" style="flex: 0 0 auto;">
-            <a href="reports.php" class="btn btn-outline-secondary"><i class="fas fa-redo me-2"></i>Reset</a>
-        </div>
-    </form>
-
-    <!-- KEY STATS -->
-    <div class="row g-3 mb-3">
-        <div class="col-lg-3 col-md-6 col-6">
-            <div class="stat-card bg-primary">
-                <div class="stat-icon"><i class="fas fa-users"></i></div>
-                <h3 class="stat-value"><?= number_format($total_students) ?></h3>
-                <p class="stat-label">Total Students</p>
-                <div class="stat-bg-icon"><i class="fas fa-users"></i></div>
+    <!-- Overview Stats Row 1 -->
+    <div class="row g-3 mb-4">
+        <div class="col-lg-3 col-md-6">
+            <div class="stat-card">
+                <div class="stat-icon bg-gradient-blue"><i class="fas fa-users"></i></div>
+                <div class="stat-info">
+                    <h3><?= number_format($total_students) ?></h3>
+                    <p>Total Students</p>
+                </div>
             </div>
         </div>
-        <div class="col-lg-3 col-md-6 col-6">
-            <div class="stat-card bg-success">
-                <div class="stat-icon"><i class="fas fa-check-circle"></i></div>
-                <h3 class="stat-value"><?= number_format($active_students) ?></h3>
-                <p class="stat-label">Active Students</p>
-                <div class="stat-bg-icon"><i class="fas fa-check-circle"></i></div>
+        <div class="col-lg-3 col-md-6">
+            <div class="stat-card">
+                <div class="stat-icon bg-gradient-green"><i class="fas fa-user-check"></i></div>
+                <div class="stat-info">
+                    <h3><?= number_format($allocated) ?></h3>
+                    <p>Allocated</p>
+                </div>
             </div>
         </div>
-        <div class="col-lg-3 col-md-6 col-6">
-            <div class="stat-card bg-info">
-                <div class="stat-icon"><i class="fas fa-building"></i></div>
-                <h3 class="stat-value"><?= number_format($total_hostels) ?></h3>
-                <p class="stat-label">Total Hostels</p>
-                <div class="stat-bg-icon"><i class="fas fa-building"></i></div>
+        <div class="col-lg-3 col-md-6">
+            <div class="stat-card">
+                <div class="stat-icon bg-gradient-orange"><i class="fas fa-user-clock"></i></div>
+                <div class="stat-info">
+                    <h3><?= number_format($unallocated) ?></h3>
+                    <p>Unallocated</p>
+                </div>
             </div>
         </div>
-        <div class="col-lg-3 col-md-6 col-6">
-            <div class="stat-card bg-warning">
-                <div class="stat-icon"><i class="fas fa-money-bill-wave"></i></div>
-                <h3 class="stat-value" style="font-size:1.3rem;">₦<?= number_format((float)$total_revenue, 0) ?></h3>
-                <p class="stat-label">Total Revenue</p>
-                <div class="stat-bg-icon"><i class="fas fa-money-bill-wave"></i></div>
+        <div class="col-lg-3 col-md-6">
+            <div class="stat-card">
+                <div class="stat-icon bg-gradient-teal"><i class="fas fa-percentage"></i></div>
+                <div class="stat-info">
+                    <h3><?= number_format($occupancy_rate, 1) ?>%</h3>
+                    <p>Occupancy Rate</p>
+                </div>
             </div>
         </div>
     </div>
 
-    <!-- CHARTS ROW 1: MONTHLY REVENUE + GENDER -->
+    <!-- Overview Stats Row 2 -->
+    <div class="row g-3 mb-4">
+        <div class="col-lg-3 col-md-6">
+            <div class="stat-card">
+                <div class="stat-icon bg-gradient-purple"><i class="fas fa-hotel"></i></div>
+                <div class="stat-info">
+                    <h3><?= number_format($total_hostels) ?></h3>
+                    <p>Active Hostels</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6">
+            <div class="stat-card">
+                <div class="stat-icon bg-gradient-blue"><i class="fas fa-door-open"></i></div>
+                <div class="stat-info">
+                    <h3><?= number_format($total_rooms) ?></h3>
+                    <p>Total Rooms</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6">
+            <div class="stat-card">
+                <div class="stat-icon bg-gradient-green"><i class="fas fa-bed"></i></div>
+                <div class="stat-info">
+                    <h3><?= number_format($available_rooms) ?></h3>
+                    <p>Available Rooms</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6">
+            <div class="stat-card">
+                <div class="stat-icon bg-gradient-orange"><i class="fas fa-door-closed"></i></div>
+                <div class="stat-info">
+                    <h3><?= number_format($occupied_rooms) ?></h3>
+                    <p>Occupied Rooms</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Revenue Stats -->
+    <div class="row g-3 mb-4">
+        <div class="col-lg-4 col-md-6">
+            <div class="stat-card">
+                <div class="stat-icon bg-gradient-green"><i class="fas fa-money-bill-wave"></i></div>
+                <div class="stat-info">
+                    <h3 style="font-size:1.3rem;">₦<?= number_format($total_collected, 0) ?></h3>
+                    <p>Total Collected</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-4 col-md-6">
+            <div class="stat-card">
+                <div class="stat-icon bg-gradient-orange"><i class="fas fa-hourglass-half"></i></div>
+                <div class="stat-info">
+                    <h3 style="font-size:1.3rem;">₦<?= number_format($total_pending, 0) ?></h3>
+                    <p>Pending Payments</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-4 col-md-6">
+            <div class="stat-card">
+                <div class="stat-icon bg-gradient-red"><i class="fas fa-times-circle"></i></div>
+                <div class="stat-info">
+                    <h3 style="font-size:1.3rem;">₦<?= number_format($total_failed, 0) ?></h3>
+                    <p>Failed Payments</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="row g-3">
-        <div class="col-lg-8">
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="card-title mb-0"><i class="fas fa-chart-line me-2"></i>Monthly Revenue (Last 12 Months)</h5>
-                </div>
-                <div class="card-body">
-                    <canvas id="revenueChart" height="100"></canvas>
-                </div>
-            </div>
-        </div>
-        <div class="col-lg-4">
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="card-title mb-0"><i class="fas fa-venus-mars me-2"></i>Gender Distribution</h5>
-                </div>
-                <div class="card-body">
-                    <canvas id="genderChart" height="220"></canvas>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- CHARTS ROW 2: PAYMENT STATUS + LEVEL -->
-    <div class="row g-3">
+        <!-- Revenue by Month -->
         <div class="col-lg-6">
-            <div class="card">
+            <div class="card h-100">
                 <div class="card-header">
-                    <h5 class="card-title mb-0"><i class="fas fa-credit-card me-2"></i>Payment Status Breakdown</h5>
+                    <h3 class="mb-0"><i class="fas fa-money-bill-wave me-2"></i>Revenue (Last 6 Months)</h3>
                 </div>
-                <div class="card-body">
-                    <canvas id="paymentChart" height="180"></canvas>
+                <div class="card-body p-0">
+                    <?php if ($revenue_by_month && $revenue_by_month->num_rows > 0): ?>
+                    <table class="table">
+                        <thead><tr><th>Month</th><th>Transactions</th><th>Total</th></tr></thead>
+                        <tbody>
+                            <?php $grand = 0; while ($r = $revenue_by_month->fetch_assoc()): $grand += $r['total']; ?>
+                            <tr>
+                                <td><strong><?= htmlspecialchars($r['label']) ?></strong></td>
+                                <td><?= (int)$r['count'] ?></td>
+                                <td><strong style="color:#28a745;">₦<?= number_format((float)$r['total'], 0) ?></strong></td>
+                            </tr>
+                            <?php endwhile; ?>
+                            <tr style="background:#f8f9fa;">
+                                <td colspan="2"><strong>Grand Total</strong></td>
+                                <td><strong style="color:#1a3a6b;font-size:1.05rem;">₦<?= number_format($grand, 0) ?></strong></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <?php else: ?>
+                        <p class="text-muted text-center py-4 mb-0">No revenue data yet.</p>
+                    <?php endif; ?>
                 </div>
             </div>
         </div>
+
+        <!-- Occupancy by Hostel -->
         <div class="col-lg-6">
-            <div class="card">
+            <div class="card h-100">
                 <div class="card-header">
-                    <h5 class="card-title mb-0"><i class="fas fa-graduation-cap me-2"></i>Students by Level</h5>
+                    <h3 class="mb-0"><i class="fas fa-chart-pie me-2"></i>Hostel Occupancy</h3>
                 </div>
                 <div class="card-body">
-                    <canvas id="levelChart" height="180"></canvas>
+                    <?php if ($occupancy && $occupancy->num_rows > 0): 
+                        while ($o = $occupancy->fetch_assoc()): 
+                            $cap = (int)$o['capacity'];
+                            $occ = (int)$o['occupied'];
+                            $pct = $cap > 0 ? ($occ / $cap) * 100 : 0;
+                            $color = $pct >= 90 ? 'danger' : ($pct >= 60 ? 'warning' : 'success');
+                    ?>
+                    <div class="mb-3">
+                        <div class="d-flex justify-content-between mb-1">
+                            <strong style="color:#1a2a4a;"><?= htmlspecialchars($o['name']) ?></strong>
+                            <span style="font-size:0.85rem;color:#6c757d;"><?= $occ ?>/<?= $cap ?> (<?= number_format($pct,0) ?>%)</span>
+                        </div>
+                        <div class="progress">
+                            <div class="progress-bar bg-<?= $color ?>" style="width:<?= $pct ?>%"></div>
+                        </div>
+                    </div>
+                    <?php endwhile; endif; ?>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bed Spacing Distribution -->
+        <div class="col-lg-6">
+            <div class="card h-100">
+                <div class="card-header">
+                    <h3 class="mb-0"><i class="fas fa-bed me-2"></i>Bed Spacing Distribution</h3>
+                </div>
+                <div class="card-body p-0">
+                    <table class="table">
+                        <thead><tr><th>Spacing</th><th>Rooms</th><th>Total Beds</th></tr></thead>
+                        <tbody>
+                            <?php if ($spacing_dist && $spacing_dist->num_rows > 0): 
+                                while ($s = $spacing_dist->fetch_assoc()): ?>
+                            <tr>
+                                <td><span class="badge" style="background:#fff4cc;color:#856404;padding:6px 12px;border-radius:8px;">
+                                    <i class="fas fa-bed me-1"></i><?= htmlspecialchars(ucfirst($s['bed_spacing'] ?? 'Standard')) ?>
+                                </span></td>
+                                <td><strong><?= (int)$s['cnt'] ?></strong></td>
+                                <td><?= (int)$s['total_beds'] ?></td>
+                            </tr>
+                            <?php endwhile; else: ?>
+                            <tr><td colspan="3" class="text-muted text-center py-4">No data.</td></tr>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Gender Distribution -->
+        <div class="col-lg-6">
+            <div class="card h-100">
+                <div class="card-header">
+                    <h3 class="mb-0"><i class="fas fa-venus-mars me-2"></i>Students by Gender</h3>
+                </div>
+                <div class="card-body p-0">
+                    <table class="table">
+                        <thead><tr><th>Gender</th><th>Count</th></tr></thead>
+                        <tbody>
+                            <?php if ($gender_dist && $gender_dist->num_rows > 0): 
+                                while ($g = $gender_dist->fetch_assoc()): ?>
+                            <tr>
+                                <td>
+                                    <i class="fas fa-<?= strtolower($g['gender']) === 'female' ? 'venus' : 'mars' ?> me-2" style="color:#1a3a6b;"></i>
+                                    <strong><?= htmlspecialchars($g['gender'] ?: 'Unspecified') ?></strong>
+                                </td>
+                                <td><strong><?= (int)$g['cnt'] ?></strong></td>
+                            </tr>
+                            <?php endwhile; else: ?>
+                            <tr><td colspan="2" class="text-muted text-center py-4">No data.</td></tr>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Level Distribution -->
+        <div class="col-lg-6">
+            <div class="card h-100">
+                <div class="card-header">
+                    <h3 class="mb-0"><i class="fas fa-graduation-cap me-2"></i>Students by Level</h3>
+                </div>
+                <div class="card-body p-0">
+                    <table class="table">
+                        <thead><tr><th>Level</th><th>Count</th></tr></thead>
+                        <tbody>
+                            <?php if ($level_dist && $level_dist->num_rows > 0): 
+                                while ($l = $level_dist->fetch_assoc()): ?>
+                            <tr>
+                                <td><span class="badge bg-primary" style="padding:6px 14px;"><?= htmlspecialchars($l['level'] ?: 'N/A') ?></span></td>
+                                <td><strong><?= (int)$l['cnt'] ?></strong></td>
+                            </tr>
+                            <?php endwhile; else: ?>
+                            <tr><td colspan="2" class="text-muted text-center py-4">No data.</td></tr>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Quick Actions -->
+        <div class="col-lg-6">
+            <div class="card h-100">
+                <div class="card-header">
+                    <h3 class="mb-0"><i class="fas fa-bolt me-2"></i>Quick Actions</h3>
+                </div>
+                <div class="card-body">
+                    <div class="d-grid gap-2">
+                        <a href="students.php" class="btn btn-outline-secondary text-start">
+                            <i class="fas fa-users me-2"></i>View All Students
+                        </a>
+                        <a href="allocations.php" class="btn btn-outline-secondary text-start">
+                            <i class="fas fa-door-open me-2"></i>View Allocations
+                        </a>
+                        <a href="payments.php" class="btn btn-outline-secondary text-start">
+                            <i class="fas fa-credit-card me-2"></i>View Payments
+                        </a>
+                        <a href="logs.php" class="btn btn-outline-secondary text-start">
+                            <i class="fas fa-history me-2"></i>View Activity Logs
+                        </a>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
-
-    <!-- OCCUPANCY BY HOSTEL -->
-    <div class="card">
-        <div class="card-header">
-            <h5 class="card-title mb-0"><i class="fas fa-building me-2"></i>Room Occupancy by Hostel</h5>
-        </div>
-        <div class="card-body table-responsive">
-            <table class="table table-hover">
-                <thead>
-                    <tr>
-                        <th>Hostel</th>
-                        <th>Total Rooms</th>
-                        <th>Occupied</th>
-                        <th>Available</th>
-                        <th style="width: 250px;">Occupancy Rate</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php if (empty($hostel_stats)): ?>
-                        <tr><td colspan="5" class="text-center py-4 text-muted">No hostels found</td></tr>
-                    <?php else: ?>
-                        <?php foreach ($hostel_stats as $h): 
-                            $rate = $h['total_rooms'] > 0 ? round(($h['occupied'] / $h['total_rooms']) * 100, 1) : 0;
-                            $color = $rate > 80 ? 'bg-danger' : ($rate > 50 ? 'bg-warning' : 'bg-success');
-                        ?>
-                            <tr>
-                                <td><strong><?= htmlspecialchars($h['name']) ?></strong></td>
-                                <td><?= $h['total_rooms'] ?></td>
-                                <td><span class="badge bg-danger"><?= $h['occupied'] ?></span></td>
-                                <td><span class="badge bg-success"><?= $h['available'] ?></span></td>
-                                <td>
-                                    <div class="d-flex align-items-center gap-2">
-                                        <div class="progress flex-grow-1">
-                                            <div class="progress-bar <?= $color ?>" style="width: <?= $rate ?>%"></div>
-                                        </div>
-                                        <strong style="min-width: 45px;"><?= $rate ?>%</strong>
-                                    </div>
-                                </td>
-                            </tr>
-                        <?php endforeach; ?>
-                    <?php endif; ?>
-                </tbody>
-            </table>
-        </div>
-    </div>
-
-    <!-- TOP PAYING STUDENTS -->
-    <div class="card">
-        <div class="card-header">
-            <h5 class="card-title mb-0"><i class="fas fa-trophy me-2"></i>Top 10 Paying Students</h5>
-        </div>
-        <div class="card-body table-responsive p-0">
-            <table class="table table-hover">
-                <thead>
-                    <tr>
-                        <th>#</th>
-                        <th>Student</th>
-                        <th>Matric No</th>
-                        <th>Payments</th>
-                        <th>Total Paid</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php if (empty($top_students)): ?>
-                        <tr><td colspan="5" class="text-center py-4 text-muted">No payment data available</td></tr>
-                    <?php else: ?>
-                        <?php foreach ($top_students as $i => $s): ?>
-                            <tr>
-                                <td><strong><?= $i + 1 ?></strong></td>
-                                <td><?= htmlspecialchars($s['full_name']) ?></td>
-                                <td><?= htmlspecialchars($s['matric_no']) ?></td>
-                                <td><span class="badge bg-info"><?= $s['payment_count'] ?></span></td>
-                                <td><strong style="color: #28a745;">₦<?= number_format((float)$s['total_paid'], 2) ?></strong></td>
-                            </tr>
-                        <?php endforeach; ?>
-                    <?php endif; ?>
-                </tbody>
-            </table>
-        </div>
-    </div>
-
-    <!-- REQUEST STATS -->
-    <div class="card">
-        <div class="card-header">
-            <h5 class="card-title mb-0"><i class="fas fa-clipboard-list me-2"></i>Requests Overview</h5>
-        </div>
-        <div class="card-body">
-            <div class="row g-3">
-                <div class="col-md-3 col-6">
-                    <div class="text-center p-3" style="background: #f0f4fa; border-radius: 12px;">
-                        <i class="fas fa-comments fa-2x" style="color:#0d6efd;"></i>
-                        <h4 class="mt-2 mb-0"><?= $complaints_total ?></h4>
-                        <small class="text-muted">Complaints</small>
-                        <div class="mt-2"><span class="badge bg-warning"><?= $complaints_pending ?> pending</span></div>
-                    </div>
-                </div>
-                <div class="col-md-3 col-6">
-                    <div class="text-center p-3" style="background: #fff3cd; border-radius: 12px;">
-                        <i class="fas fa-wrench fa-2x" style="color:#fd7e14;"></i>
-                        <h4 class="mt-2 mb-0"><?= $maintenance_total ?></h4>
-                        <small class="text-muted">Maintenance</small>
-                        <div class="mt-2"><span class="badge bg-warning"><?= $maintenance_pending ?> pending</span></div>
-                    </div>
-                </div>
-                <div class="col-md-3 col-6">
-                    <div class="text-center p-3" style="background: #f8d7da; border-radius: 12px;">
-                        <i class="fas fa-money-bill-wave fa-2x" style="color:#dc3545;"></i>
-                        <h4 class="mt-2 mb-0"><?= $refund_total ?></h4>
-                        <small class="text-muted">Refunds</small>
-                        <div class="mt-2"><span class="badge bg-warning"><?= $refund_pending ?> pending</span></div>
-                    </div>
-                </div>
-                <div class="col-md-3 col-6">
-                    <div class="text-center p-3" style="background: #d1ecf1; border-radius: 12px;">
-                        <i class="fas fa-exchange-alt fa-2x" style="color:#17a2b8;"></i>
-                        <h4 class="mt-2 mb-0"><?= $room_change_total ?></h4>
-                        <small class="text-muted">Room Changes</small>
-                        <div class="mt-2"><span class="badge bg-warning"><?= $room_change_pending ?> pending</span></div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- RECENT PAYMENTS (filtered) -->
-    <div class="card">
-        <div class="card-header d-flex justify-content-between align-items-center">
-            <h5 class="card-title mb-0">
-                <i class="fas fa-history me-2"></i>Payments from <?= date('d M Y', strtotime($date_from)) ?> to <?= date('d M Y', strtotime($date_to)) ?>
-            </h5>
-            <span class="badge bg-secondary"><?= count($recent_payments) ?> records</span>
-        </div>
-        <div class="card-body table-responsive p-0">
-            <table class="table table-hover">
-                <thead>
-                    <tr>
-                        <th>Date</th>
-                        <th>Student</th>
-                        <th>Matric</th>
-                        <th>Reference</th>
-                        <th>Amount</th>
-                        <th>Status</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php if (empty($recent_payments)): ?>
-                        <tr><td colspan="6" class="text-center py-4 text-muted">No payments in this period</td></tr>
-                    <?php else: ?>
-                        <?php foreach ($recent_payments as $p): ?>
-                            <tr>
-                                <td><?= date('d M Y H:i', strtotime($p['created_at'])) ?></td>
-                                <td><?= htmlspecialchars($p['full_name']) ?></td>
-                                <td><?= htmlspecialchars($p['matric_no']) ?></td>
-                                <td><code style="font-size:0.75rem;"><?= htmlspecialchars($p['reference']) ?></code></td>
-                                <td><strong>₦<?= number_format((float)$p['amount'], 2) ?></strong></td>
-                                <td>
-                                    <span class="badge bg-<?= $p['status'] === 'completed' ? 'success' : ($p['status'] === 'pending' ? 'warning' : 'danger') ?>">
-                                        <?= ucfirst($p['status']) ?>
-                                    </span>
-                                </td>
-                            </tr>
-                        <?php endforeach; ?>
-                    <?php endif; ?>
-                </tbody>
-            </table>
-        </div>
-    </div>
-
 </div>
 
 <footer class="main-footer">
@@ -641,139 +668,112 @@ document.addEventListener('DOMContentLoaded', function() {
     const toggleBtn = document.getElementById('sidebarToggle');
     const closeBtn = document.getElementById('sidebarClose');
     const overlay = document.getElementById('sidebarOverlay');
+    function closeSidebar() { sidebar.classList.remove('open'); overlay.classList.remove('active'); }
+    toggleBtn?.addEventListener('click', () => { sidebar.classList.toggle('open'); overlay.classList.toggle('active'); });
+    closeBtn?.addEventListener('click', closeSidebar);
+    overlay?.addEventListener('click', closeSidebar);
+});
+</script>
+<script>
+/* ========== UNIVERSAL SIDEBAR + ANIMATIONS ========== */
+document.addEventListener('DOMContentLoaded', function() {
+    const sidebar  = document.getElementById('mainSidebar');
+    const toggleBtn = document.getElementById('sidebarToggle');
+    const closeBtn = document.getElementById('sidebarClose');
+    const overlay  = document.getElementById('sidebarOverlay');
+    const body     = document.body;
 
+    function openSidebar() {
+        if (!sidebar) return;
+        sidebar.classList.add('open');
+        overlay?.classList.add('active');
+        body.classList.add('sidebar-open');
+        body.style.overflow = 'hidden';
+        if (toggleBtn) toggleBtn.innerHTML = '<i class="fas fa-times"></i>';
+    }
     function closeSidebar() {
+        if (!sidebar) return;
         sidebar.classList.remove('open');
-        overlay.classList.remove('active');
-        document.body.style.overflow = '';
+        overlay?.classList.remove('active');
+        body.classList.remove('sidebar-open');
+        body.style.overflow = '';
+        if (toggleBtn) toggleBtn.innerHTML = '<i class="fas fa-bars"></i>';
+    }
+    function toggleSidebar() {
+        if (sidebar?.classList.contains('open')) closeSidebar();
+        else openSidebar();
     }
 
-    if (toggleBtn) toggleBtn.addEventListener('click', function() {
-        sidebar.classList.toggle('open');
-        overlay.classList.toggle('active');
-        document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : '';
+    toggleBtn?.addEventListener('click', toggleSidebar);
+    closeBtn?.addEventListener('click', closeSidebar);
+    overlay?.addEventListener('click', closeSidebar);
+
+    // ESC key closes sidebar
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') closeSidebar();
     });
-    if (closeBtn) closeBtn.addEventListener('click', closeSidebar);
-    if (overlay) overlay.addEventListener('click', closeSidebar);
 
-    // ========== MONTHLY REVENUE CHART ==========
-    const revenueLabels = <?= json_encode(array_map(function($m) {
-        return date('M Y', strtotime($m . '-01'));
-    }, array_keys($monthly_revenue))) ?>;
-    const revenueData = <?= json_encode(array_map(function($m) {
-        return (float)$m['total'];
-    }, array_values($monthly_revenue))) ?>;
-
-    new Chart(document.getElementById('revenueChart'), {
-        type: 'line',
-        data: {
-            labels: revenueLabels.length ? revenueLabels : ['No Data'],
-            datasets: [{
-                label: 'Revenue (₦)',
-                data: revenueData.length ? revenueData : [0],
-                borderColor: '#1a3a6b',
-                backgroundColor: 'rgba(26, 58, 107, 0.1)',
-                tension: 0.4,
-                fill: true,
-                pointBackgroundColor: '#1a3a6b',
-                pointBorderColor: '#fff',
-                pointBorderWidth: 2,
-                pointRadius: 6
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: true,
-            plugins: {
-                legend: { display: false },
-                tooltip: {
-                    callbacks: {
-                        label: function(ctx) {
-                            return '₦' + ctx.parsed.y.toLocaleString();
-                        }
-                    }
+    // Auto-close on link click (mobile)
+    if (window.innerWidth <= 991.98) {
+        document.querySelectorAll('.nav-sidebar .nav-link').forEach(link => {
+            link.addEventListener('click', () => {
+                if (!link.closest('.has-treeview')) {
+                    setTimeout(closeSidebar, 200);
                 }
-            },
-            scales: {
-                y: {
-                    beginAtZero: true,
-                    ticks: {
-                        callback: function(v) { return '₦' + v.toLocaleString(); }
-                    }
+            });
+        });
+    }
+
+    // Handle resize
+    let resizeTimer;
+    window.addEventListener('resize', () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+            if (window.innerWidth >= 992) {
+                sidebar?.classList.remove('open');
+                overlay?.classList.remove('active');
+                body.classList.remove('sidebar-open');
+                body.style.overflow = '';
+                if (toggleBtn) toggleBtn.innerHTML = '<i class="fas fa-bars"></i>';
+            }
+        }, 200);
+    });
+
+    // Treeview toggle
+    document.querySelectorAll('.has-treeview > .nav-link').forEach(link => {
+        link.addEventListener('click', function(e) {
+            e.preventDefault();
+            const parent = this.closest('.has-treeview');
+            const submenu = parent.querySelector('.nav-treeview');
+            document.querySelectorAll('.has-treeview').forEach(item => {
+                if (item !== parent) {
+                    item.classList.remove('menu-open');
+                    item.querySelector('.nav-treeview')?.classList.remove('show');
                 }
-            }
-        }
+            });
+            parent.classList.toggle('menu-open');
+            submenu?.classList.toggle('show');
+        });
     });
 
-    // ========== GENDER CHART ==========
-    new Chart(document.getElementById('genderChart'), {
-        type: 'doughnut',
-        data: {
-            labels: <?= json_encode(array_keys($gender_stats)) ?>,
-            datasets: [{
-                data: <?= json_encode(array_values($gender_stats)) ?>,
-                backgroundColor: ['#0d6efd', '#e83e8c', '#6c757d'],
-                borderWidth: 0
-            }]
-        },
-        options: {
-            responsive: true,
-            cutout: '65%',
-            plugins: {
-                legend: { position: 'bottom', labels: { padding: 15, usePointStyle: true } }
-            }
-        }
-    });
+    // Add animation to table rows and cards on scroll (IntersectionObserver)
+    if ('IntersectionObserver' in window) {
+        const io = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.style.opacity = '1';
+                    entry.target.style.transform = 'translateY(0)';
+                    io.unobserve(entry.target);
+                }
+            });
+        }, { threshold: 0.05 });
 
-    // ========== PAYMENT STATUS CHART ==========
-    const paymentLabels = <?= json_encode(array_map('ucfirst', array_keys($payment_stats))) ?>;
-    const paymentData = <?= json_encode(array_map(function($p) { return (int)$p['count']; }, array_values($payment_stats))) ?>;
-    const paymentColors = ['#28a745', '#ffc107', '#dc3545'];
-
-    new Chart(document.getElementById('paymentChart'), {
-        type: 'bar',
-        data: {
-            labels: paymentLabels.length ? paymentLabels : ['No Data'],
-            datasets: [{
-                label: 'Payments',
-                data: paymentData.length ? paymentData : [0],
-                backgroundColor: paymentColors,
-                borderRadius: 8,
-                barThickness: 50
-            }]
-        },
-        options: {
-            responsive: true,
-            plugins: { legend: { display: false } },
-            scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } }
-        }
-    });
-
-    // ========== LEVEL CHART ==========
-    const levelLabels = <?= json_encode(array_map(function($l) {
-        $map = ['100' => 'ND I', '200' => 'ND II', '300' => 'HND I', '400' => 'HND II'];
-        return $map[$l] ?? $l;
-    }, array_keys($level_stats))) ?>;
-    const levelData = <?= json_encode(array_values($level_stats)) ?>;
-
-    new Chart(document.getElementById('levelChart'), {
-        type: 'bar',
-        data: {
-            labels: levelLabels.length ? levelLabels : ['No Data'],
-            datasets: [{
-                label: 'Students',
-                data: levelData.length ? levelData : [0],
-                backgroundColor: ['#0d6efd', '#28a745', '#fd7e14', '#6f42c1'],
-                borderRadius: 8,
-                barThickness: 50
-            }]
-        },
-        options: {
-            responsive: true,
-            plugins: { legend: { display: false } },
-            scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } }
-        }
-    });
+        document.querySelectorAll('.card, .stat-card').forEach(el => {
+            if (el.dataset.observed) return;
+            el.dataset.observed = '1';
+            io.observe(el);
+        });
+    }
 });
 </script>
 </body>

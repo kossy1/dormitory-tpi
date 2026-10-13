@@ -656,6 +656,204 @@ foreach ($requests as $req) {
             background: #28a745 !important;
         }
 
+        /* ========== ANIMATIONS & GLOBAL ENHANCEMENTS ========== */
+* { -webkit-tap-highlight-color: transparent; }
+
+@keyframes fadeInUp {
+    from { opacity: 0; transform: translateY(20px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+@keyframes slideInLeft {
+    from { opacity: 0; transform: translateX(-30px); }
+    to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes slideInRight {
+    from { opacity: 0; transform: translateX(30px); }
+    to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes pulse {
+    0%, 100% { transform: scale(1); }
+    50%      { transform: scale(1.05); }
+}
+@keyframes shimmer {
+    0%   { background-position: -500px 0; }
+    100% { background-position: 500px 0; }
+}
+@keyframes bounceIn {
+    0%   { opacity: 0; transform: scale(0.85); }
+    60%  { opacity: 1; transform: scale(1.03); }
+    100% { transform: scale(1); }
+}
+
+/* Apply to common elements */
+.content-header { animation: fadeInUp 0.5s ease both; }
+.card { animation: fadeInUp 0.5s ease both; }
+.stat-card { animation: bounceIn 0.6s ease both; }
+
+/* Stagger stat cards */
+.row > [class*="col-"]:nth-child(1) .stat-card { animation-delay: 0.05s; }
+.row > [class*="col-"]:nth-child(2) .stat-card { animation-delay: 0.10s; }
+.row > [class*="col-"]:nth-child(3) .stat-card { animation-delay: 0.15s; }
+.row > [class*="col-"]:nth-child(4) .stat-card { animation-delay: 0.20s; }
+.row > [class*="col-"]:nth-child(5) .stat-card { animation-delay: 0.25s; }
+.row > [class*="col-"]:nth-child(6) .stat-card { animation-delay: 0.30s; }
+
+.table tbody tr { animation: fadeIn 0.4s ease both; }
+.table tbody tr:nth-child(1)  { animation-delay: 0.02s; }
+.table tbody tr:nth-child(2)  { animation-delay: 0.04s; }
+.table tbody tr:nth-child(3)  { animation-delay: 0.06s; }
+.table tbody tr:nth-child(4)  { animation-delay: 0.08s; }
+.table tbody tr:nth-child(5)  { animation-delay: 0.10s; }
+.table tbody tr:nth-child(6)  { animation-delay: 0.12s; }
+.table tbody tr:nth-child(7)  { animation-delay: 0.14s; }
+.table tbody tr:nth-child(8)  { animation-delay: 0.16s; }
+.table tbody tr:nth-child(9)  { animation-delay: 0.18s; }
+.table tbody tr:nth-child(10) { animation-delay: 0.20s; }
+
+/* Hover enhancements */
+.card { transition: transform 0.3s ease, box-shadow 0.3s ease; }
+.card:hover { transform: translateY(-3px); box-shadow: 0 12px 35px rgba(0,0,0,0.1); }
+.btn { transition: all 0.25s ease; position: relative; overflow: hidden; }
+.btn:hover { transform: translateY(-2px); }
+.btn:active { transform: translateY(0) scale(0.98); }
+
+/* Table row hover */
+.table tbody tr { transition: background 0.2s ease, transform 0.2s ease; }
+.table tbody tr:hover { background: #f0f4fa !important; }
+
+/* Modal animations */
+.modal.fade .modal-dialog {
+    transform: scale(0.9);
+    transition: transform 0.3s ease-out;
+}
+.modal.show .modal-dialog { transform: scale(1); }
+
+/* Sidebar smoothness */
+.main-sidebar { will-change: transform; }
+
+/* Loading shimmer on images */
+img[loading="lazy"] {
+    background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+    background-size: 500px 100%;
+    animation: shimmer 1.5s infinite linear;
+}
+
+/* Focus outline for accessibility */
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible {
+    outline: 2px solid #1a3a6b;
+    outline-offset: 2px;
+}
+
+/* Reduce motion for users who prefer it */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}
+
+/* ========== MOBILE RESPONSIVENESS ========== */
+@media (max-width: 991.98px) {
+    .content-wrapper { padding: 15px !important; padding-top: 75px !important; }
+    .content-header h1 { font-size: 1.4rem !important; }
+    .card-header { padding: 15px 18px !important; }
+    .card-body { padding: 18px !important; }
+    .stat-card { padding: 16px !important; gap: 12px !important; }
+    .stat-card .stat-icon { width: 48px !important; height: 48px !important; font-size: 1.25rem !important; }
+    .stat-card .stat-info h3 { font-size: 1.3rem !important; }
+    .stat-card .stat-info p { font-size: 0.78rem !important; }
+}
+
+@media (max-width: 767.98px) {
+    .content-header h1 { font-size: 1.25rem !important; }
+    .content-header { padding-bottom: 12px !important; margin-bottom: 15px !important; }
+
+    .card { border-radius: 12px !important; margin-bottom: 15px !important; }
+    .card-header { padding: 12px 15px !important; }
+    .card-header h3, .card-header .card-title { font-size: 0.95rem !important; }
+    .card-body { padding: 15px !important; }
+
+    /* Make tables scroll horizontally */
+    .table-responsive { -webkit-overflow-scrolling: touch; border-radius: 10px; }
+    .table thead th { font-size: 0.7rem !important; padding: 8px 10px !important; white-space: nowrap; }
+    .table tbody td { font-size: 0.8rem !important; padding: 8px 10px !important; }
+
+    /* Full-width buttons in modals */
+    .modal-footer .btn { width: 100%; margin: 4px 0 !important; }
+    .modal-footer { flex-direction: column; }
+    .modal-footer > * { margin: 4px 0 !important; }
+    .modal-body { padding: 15px !important; }
+    .modal-header { padding: 12px 15px !important; }
+    .modal-header .modal-title { font-size: 1rem !important; }
+
+    /* Stacked stat cards */
+    .stat-card { flex-direction: row !important; padding: 14px !important; }
+    .stat-card .stat-icon { width: 42px !important; height: 42px !important; font-size: 1.1rem !important; }
+    .stat-card .stat-info h3 { font-size: 1.15rem !important; }
+    .stat-card .stat-info p { font-size: 0.72rem !important; margin-top: 2px !important; }
+
+    /* Better form controls on mobile */
+    .form-control, .form-select {
+        font-size: 16px !important; /* Prevents iOS zoom on focus */
+        padding: 10px 14px !important;
+    }
+
+    /* Full-width actions */
+    .d-flex.gap-2.flex-wrap > .btn,
+    .d-flex.gap-1.flex-wrap > .btn { flex: 1 1 auto; min-width: 45%; }
+}
+
+@media (max-width: 575.98px) {
+    .content-wrapper { padding: 10px !important; padding-top: 70px !important; }
+    .content-header h1 { font-size: 1.1rem !important; }
+    .content-header h1 i { font-size: 0.95rem !important; }
+
+    .card { border-radius: 10px !important; }
+    .card-header { padding: 10px 12px !important; }
+    .card-body { padding: 12px !important; }
+
+    .stat-card { padding: 12px !important; gap: 10px !important; }
+    .stat-card .stat-icon { width: 38px !important; height: 38px !important; font-size: 1rem !important; }
+    .stat-card .stat-info h3 { font-size: 1rem !important; }
+    .stat-card .stat-info p { font-size: 0.68rem !important; }
+
+    /* Sidebar takes more width on small screens */
+    .main-sidebar { width: 260px !important; max-width: 85% !important; }
+
+    /* Compact stat grid - 2 per row */
+    .row.g-3 > .col-6 { flex: 0 0 50%; max-width: 50%; }
+
+    /* Make the search form full width */
+    .search-wrapper { width: 100%; }
+    .search-wrapper form { width: 100%; }
+    .search-wrapper .form-control { min-width: 100% !important; }
+
+    /* Compact tables */
+    .table thead th { font-size: 0.65rem !important; padding: 6px 8px !important; }
+    .table tbody td { font-size: 0.75rem !important; padding: 6px 8px !important; }
+}
+
+/* Touch-friendly target sizes */
+@media (hover: none) and (pointer: coarse) {
+    .nav-sidebar .nav-link { padding: 12px 16px !important; }
+    .btn { min-height: 40px; }
+    .btn-sm { min-height: 34px; padding: 6px 12px !important; }
+}
+
+/* Print styles */
+@media print {
+    .main-sidebar, .sidebar-toggle-btn, .sidebar-overlay,
+    .main-footer, .content-header .btn, .card-header .btn { display: none !important; }
+    .content-wrapper { margin-left: 0 !important; padding: 0 !important; }
+    .card { box-shadow: none !important; border: 1px solid #ddd !important; }
+    body { background: white !important; }
+}
+
         /* ========== BUTTONS ========== */
         .btn-primary {
             background: linear-gradient(135deg, #1a3a6b, #0d1b3e);
@@ -1705,5 +1903,107 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 
+<script>
+/* ========== UNIVERSAL SIDEBAR + ANIMATIONS ========== */
+document.addEventListener('DOMContentLoaded', function() {
+    const sidebar  = document.getElementById('mainSidebar');
+    const toggleBtn = document.getElementById('sidebarToggle');
+    const closeBtn = document.getElementById('sidebarClose');
+    const overlay  = document.getElementById('sidebarOverlay');
+    const body     = document.body;
+
+    function openSidebar() {
+        if (!sidebar) return;
+        sidebar.classList.add('open');
+        overlay?.classList.add('active');
+        body.classList.add('sidebar-open');
+        body.style.overflow = 'hidden';
+        if (toggleBtn) toggleBtn.innerHTML = '<i class="fas fa-times"></i>';
+    }
+    function closeSidebar() {
+        if (!sidebar) return;
+        sidebar.classList.remove('open');
+        overlay?.classList.remove('active');
+        body.classList.remove('sidebar-open');
+        body.style.overflow = '';
+        if (toggleBtn) toggleBtn.innerHTML = '<i class="fas fa-bars"></i>';
+    }
+    function toggleSidebar() {
+        if (sidebar?.classList.contains('open')) closeSidebar();
+        else openSidebar();
+    }
+
+    toggleBtn?.addEventListener('click', toggleSidebar);
+    closeBtn?.addEventListener('click', closeSidebar);
+    overlay?.addEventListener('click', closeSidebar);
+
+    // ESC key closes sidebar
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') closeSidebar();
+    });
+
+    // Auto-close on link click (mobile)
+    if (window.innerWidth <= 991.98) {
+        document.querySelectorAll('.nav-sidebar .nav-link').forEach(link => {
+            link.addEventListener('click', () => {
+                if (!link.closest('.has-treeview')) {
+                    setTimeout(closeSidebar, 200);
+                }
+            });
+        });
+    }
+
+    // Handle resize
+    let resizeTimer;
+    window.addEventListener('resize', () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+            if (window.innerWidth >= 992) {
+                sidebar?.classList.remove('open');
+                overlay?.classList.remove('active');
+                body.classList.remove('sidebar-open');
+                body.style.overflow = '';
+                if (toggleBtn) toggleBtn.innerHTML = '<i class="fas fa-bars"></i>';
+            }
+        }, 200);
+    });
+
+    // Treeview toggle
+    document.querySelectorAll('.has-treeview > .nav-link').forEach(link => {
+        link.addEventListener('click', function(e) {
+            e.preventDefault();
+            const parent = this.closest('.has-treeview');
+            const submenu = parent.querySelector('.nav-treeview');
+            document.querySelectorAll('.has-treeview').forEach(item => {
+                if (item !== parent) {
+                    item.classList.remove('menu-open');
+                    item.querySelector('.nav-treeview')?.classList.remove('show');
+                }
+            });
+            parent.classList.toggle('menu-open');
+            submenu?.classList.toggle('show');
+        });
+    });
+
+    // Add animation to table rows and cards on scroll (IntersectionObserver)
+    if ('IntersectionObserver' in window) {
+        const io = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.style.opacity = '1';
+                    entry.target.style.transform = 'translateY(0)';
+                    io.unobserve(entry.target);
+                }
+            });
+        }, { threshold: 0.05 });
+
+        document.querySelectorAll('.card, .stat-card').forEach(el => {
+            if (el.dataset.observed) return;
+            el.dataset.observed = '1';
+            io.observe(el);
+        });
+    }
+});
+</script>
 </body>
 </html>

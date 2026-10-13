@@ -11,14 +11,13 @@ $student_id = $_SESSION['student_id'];
 $reference = trim($_GET['reference'] ?? '');
 $room_id = (int)($_GET['room_id'] ?? 0);
 
-// Fetch student
 $student = $conn->query("SELECT * FROM students WHERE id = $student_id")->fetch_assoc();
 
 if (empty($reference) || $room_id <= 0) {
     die("Invalid payment reference or missing room selection.");
 }
 
-// ===== VERIFY PAYMENT WITH PAYSTACK =====
+// Verify with Paystack
 $curl = curl_init();
 curl_setopt_array($curl, [
     CURLOPT_URL => "https://api.paystack.co/transaction/verify/" . rawurlencode($reference),
@@ -37,15 +36,15 @@ if (!$result || !isset($result['status']) || $result['status'] !== true) {
 }
 
 $payment_data = $result['data'];
-$payment_status = $payment_data['status']; // 'success'
-$amount_paid = $payment_data['amount'] / 100; // kobo → naira
+$payment_status = $payment_data['status'];
+$amount_paid = $payment_data['amount'] / 100;
 $payment_reference = $payment_data['reference'];
 
 if ($payment_status !== 'success') {
     die("Payment was not successful. Status: " . htmlspecialchars($payment_status));
 }
 
-// ===== CHECK FOR DUPLICATE REFERENCE =====
+// Duplicate reference check
 $check = $conn->prepare("SELECT id FROM payments WHERE reference = ?");
 $check->bind_param("s", $payment_reference);
 $check->execute();
@@ -54,7 +53,7 @@ if ($check->get_result()->num_rows > 0) {
     exit;
 }
 
-// ===== FETCH THE SELECTED ROOM =====
+// Fetch room
 $room = $conn->query("
     SELECT r.*, h.name AS hostel_name 
     FROM rooms r 
@@ -64,34 +63,29 @@ $room = $conn->query("
 ")->fetch_assoc();
 
 if (!$room) {
-    // Room was taken — record the payment but flag for admin
     $stmt = $conn->prepare("
         INSERT INTO payments (student_id, amount, reference, status, created_at) 
         VALUES (?, ?, ?, 'pending', NOW())
     ");
     $stmt->bind_param("ids", $student_id, $amount_paid, $payment_reference);
     $stmt->execute();
-
-    die("Sorry, the room was taken by another student before your payment completed. 
-         Your payment has been recorded. Please contact the Student Affairs Unit for a refund or reallocation.");
+    die("Sorry, the room was taken. Your payment has been recorded. Contact Student Affairs for a refund.");
 }
 
-// ===== CHECK ROOM ISN'T FULL =====
 $current = $conn->query("SELECT COUNT(*) FROM allocations WHERE room_id = $room_id AND status = 'active'")->fetch_row()[0];
 if ($current >= $room['capacity']) {
     die("This room is now full. Please contact support.");
 }
 
-// ===== CREATE PAYMENT RECORD =====
+// Insert payment
 $stmt = $conn->prepare("
     INSERT INTO payments (student_id, amount, reference, status, created_at) 
     VALUES (?, ?, ?, 'completed', NOW())
 ");
 $stmt->bind_param("ids", $student_id, $amount_paid, $payment_reference);
 $stmt->execute();
-$payment_id = $conn->insert_id;
 
-// ===== CREATE ALLOCATION =====
+// Insert allocation
 $semester = $student['semester'] ?? '1';
 $stmt = $conn->prepare("
     INSERT INTO allocations (student_id, room_id, semester, allocation_date, status) 
@@ -99,14 +93,27 @@ $stmt = $conn->prepare("
 ");
 $stmt->bind_param("iis", $student_id, $room_id, $semester);
 $stmt->execute();
-$allocation_id = $conn->insert_id;
+$allocation_id = (int)$conn->insert_id;
 
-// ===== UPDATE ROOM STATUS =====
+// Update room
 $new_occupancy = $current + 1;
 $new_status = ($new_occupancy >= $room['capacity']) ? 'occupied' : 'available';
 $conn->query("UPDATE rooms SET status = '$new_status', current_occupancy = $new_occupancy WHERE id = $room_id");
 
-// ===== REDIRECT WITH SUCCESS =====
+// ===== LOG FOR ADMIN =====
+$admin_name = 'System (Paystack)';
+$ip = $_SERVER['REMOTE_ADDR'] ?? '';
+$ua = substr($_SERVER['HTTP_USER_AGENT'] ?? '', 0, 255);
+$desc = "Auto-allocated Room {$room['room_number']} to student ID $student_id — ref: $payment_reference";
+$log_stmt = $conn->prepare("
+    INSERT INTO activity_logs 
+        (admin_id, admin_name, action, entity_type, entity_id, description, ip_address, user_agent, created_at)
+    VALUES 
+        (NULL, ?, 'payment', 'allocation', ?, ?, ?, ?, NOW())
+");
+$log_stmt->bind_param("sisss", $admin_name, $allocation_id, $desc, $ip, $ua);
+$log_stmt->execute();
+
 $_SESSION['flash_success'] = "Payment successful! Room {$room['room_number']} at {$room['hostel_name']} has been allocated to you.";
 header("Location: my-room.php?allocated=1");
 exit;

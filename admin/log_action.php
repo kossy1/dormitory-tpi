@@ -1,47 +1,54 @@
 <?php
 /**
- * admin/log_action.php
- * Reusable helper to log an admin action.
+ * Central activity logger for admin panel.
  * 
  * Usage:
- *   include 'log_action.php';
- *   log_action($conn, 'Create Hostel', 'hostel', $new_id, "Added hostel: $name");
+ *   log_action($conn, 'create', 'room', $id, "Added room A101");
+ *   log_action($conn, 'login', 'admin', $admin_id, "Admin logged in");
  */
 
 if (!function_exists('log_action')) {
-    function log_action($conn, $action, $entity_type = null, $entity_id = null, $description = '') {
-        // Detect admin info
-        $admin_id   = $_SESSION['admin_id'] ?? 0;
-        $admin_name = $_SESSION['admin_name'] ?? 'Administrator';
-
-        // Get IP address
-        $ip = 'Unknown';
-        if (!empty($_SERVER['HTTP_CLIENT_IP'])) {
-            $ip = $_SERVER['HTTP_CLIENT_IP'];
-        } elseif (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
-            $ip = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0];
-        } elseif (!empty($_SERVER['REMOTE_ADDR'])) {
-            $ip = $_SERVER['REMOTE_ADDR'];
+    function log_action($conn, string $action, ?string $entity_type = null, $entity_id = null, ?string $description = null): bool
+    {
+        // Check if table exists (cached per request)
+        static $table_exists = null;
+        if ($table_exists === null) {
+            $res = @$conn->query("SHOW TABLES LIKE 'activity_logs'");
+            $table_exists = ($res && $res->num_rows > 0);
         }
-        $ip = substr(trim($ip), 0, 45);
+        if (!$table_exists) return false;
 
-        // User agent (truncated)
-        $ua = substr($_SERVER['HTTP_USER_AGENT'] ?? '', 0, 255);
+        $admin_id   = $_SESSION['admin_id']   ?? $_SESSION['staff_id']   ?? null;
+        $admin_name = $_SESSION['admin_name'] ?? $_SESSION['staff_name'] ?? 'System';
+        $ip         = $_SERVER['REMOTE_ADDR'] ?? null;
+        $ua         = substr($_SERVER['HTTP_USER_AGENT'] ?? '', 0, 255);
+        $eid        = ($entity_id !== null) ? (int)$entity_id : null;
 
-        // Insert log
-        $stmt = $conn->prepare("
+        $stmt = @$conn->prepare("
             INSERT INTO activity_logs 
-            (admin_id, admin_name, action, entity_type, entity_id, description, ip_address, user_agent) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (admin_id, admin_name, action, entity_type, entity_id, description, ip_address, user_agent, created_at)
+            VALUES 
+                (?, ?, ?, ?, ?, ?, ?, ?, NOW())
         ");
-        if (!$stmt) return false;
+        if (!$stmt) {
+            error_log("log_action: prepare failed - " . $conn->error);
+            return false;
+        }
 
-        $entity_id = $entity_id ?: null;
         $stmt->bind_param(
             "isssisss",
             $admin_id, $admin_name, $action, $entity_type,
-            $entity_id, $description, $ip, $ua
+            $eid, $description, $ip, $ua
         );
-        return $stmt->execute();
+        $ok = $stmt->execute();
+        $stmt->close();
+        return $ok;
+    }
+}
+
+// Alias for consistency with earlier code
+if (!function_exists('logActivity')) {
+    function logActivity($conn, string $action, ?string $entity_type = null, ?int $entity_id = null, ?string $description = null): bool {
+        return log_action($conn, $action, $entity_type, $entity_id, $description);
     }
 }

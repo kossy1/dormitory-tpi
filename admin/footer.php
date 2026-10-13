@@ -55,7 +55,108 @@ function confirmDelete(url, message) {
 }
 </script>
 
+<script>
+/* ========== UNIVERSAL SIDEBAR + ANIMATIONS ========== */
+document.addEventListener('DOMContentLoaded', function() {
+    const sidebar  = document.getElementById('mainSidebar');
+    const toggleBtn = document.getElementById('sidebarToggle');
+    const closeBtn = document.getElementById('sidebarClose');
+    const overlay  = document.getElementById('sidebarOverlay');
+    const body     = document.body;
 
+    function openSidebar() {
+        if (!sidebar) return;
+        sidebar.classList.add('open');
+        overlay?.classList.add('active');
+        body.classList.add('sidebar-open');
+        body.style.overflow = 'hidden';
+        if (toggleBtn) toggleBtn.innerHTML = '<i class="fas fa-times"></i>';
+    }
+    function closeSidebar() {
+        if (!sidebar) return;
+        sidebar.classList.remove('open');
+        overlay?.classList.remove('active');
+        body.classList.remove('sidebar-open');
+        body.style.overflow = '';
+        if (toggleBtn) toggleBtn.innerHTML = '<i class="fas fa-bars"></i>';
+    }
+    function toggleSidebar() {
+        if (sidebar?.classList.contains('open')) closeSidebar();
+        else openSidebar();
+    }
+
+    toggleBtn?.addEventListener('click', toggleSidebar);
+    closeBtn?.addEventListener('click', closeSidebar);
+    overlay?.addEventListener('click', closeSidebar);
+
+    // ESC key closes sidebar
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') closeSidebar();
+    });
+
+    // Auto-close on link click (mobile)
+    if (window.innerWidth <= 991.98) {
+        document.querySelectorAll('.nav-sidebar .nav-link').forEach(link => {
+            link.addEventListener('click', () => {
+                if (!link.closest('.has-treeview')) {
+                    setTimeout(closeSidebar, 200);
+                }
+            });
+        });
+    }
+
+    // Handle resize
+    let resizeTimer;
+    window.addEventListener('resize', () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+            if (window.innerWidth >= 992) {
+                sidebar?.classList.remove('open');
+                overlay?.classList.remove('active');
+                body.classList.remove('sidebar-open');
+                body.style.overflow = '';
+                if (toggleBtn) toggleBtn.innerHTML = '<i class="fas fa-bars"></i>';
+            }
+        }, 200);
+    });
+
+    // Treeview toggle
+    document.querySelectorAll('.has-treeview > .nav-link').forEach(link => {
+        link.addEventListener('click', function(e) {
+            e.preventDefault();
+            const parent = this.closest('.has-treeview');
+            const submenu = parent.querySelector('.nav-treeview');
+            document.querySelectorAll('.has-treeview').forEach(item => {
+                if (item !== parent) {
+                    item.classList.remove('menu-open');
+                    item.querySelector('.nav-treeview')?.classList.remove('show');
+                }
+            });
+            parent.classList.toggle('menu-open');
+            submenu?.classList.toggle('show');
+        });
+    });
+
+    // Add animation to table rows and cards on scroll (IntersectionObserver)
+    if ('IntersectionObserver' in window) {
+        const io = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.style.opacity = '1';
+                    entry.target.style.transform = 'translateY(0)';
+                    io.unobserve(entry.target);
+                }
+            });
+        }, { threshold: 0.05 });
+
+        document.querySelectorAll('.card, .stat-card').forEach(el => {
+            if (el.dataset.observed) return;
+            el.dataset.observed = '1';
+            io.observe(el);
+        });
+    }
+});
+</script>
 
 </body>
 </html>
